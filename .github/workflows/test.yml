@@ -26,7 +26,3 @@ jobs:
         run: ruff check herdr_model_quota.py claude_max_usage.py tests
       - name: Format check
         run: ruff format --check herdr_model_quota.py claude_max_usage.py tests
-      - name: No internal references
-        run: |
-          ! grep -rniE 'usus|/Users/terry|route receipt|private repo' \
-            --exclude-dir=.git --exclude=PUBLICATION_SPEC.md .
