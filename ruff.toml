@@ -1,0 +1,6 @@
+# Ruff: tests are stdlib-only and use tomllib (Python 3.11+); without a
+# target-version ruff classifies tomllib as third-party and flags imports.
+target-version = "py311"
+
+[lint.isort]
+known-first-party = ["claude_max_usage", "herdr_model_quota"]

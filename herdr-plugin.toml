@@ -1,0 +1,27 @@
+id = "terry.herdr-model-quota"
+name = "Model Quota"
+version = "2.1.0"
+min_herdr_version = "0.8.0"
+description = "Show Codex and Claude Max subscription capacity in the focused workspace row"
+platforms = ["macos", "linux"]
+
+[[startup]]
+command = ["python3", "herdr_model_quota.py"]
+
+[[actions]]
+id = "refresh"
+title = "Refresh model quotas"
+command = ["python3", "herdr_model_quota.py", "refresh", "--force"]
+
+[[actions]]
+id = "clear"
+title = "Clear model quotas"
+command = ["python3", "herdr_model_quota.py", "clear"]
+
+[[events]]
+on = "workspace.focused"
+command = ["python3", "herdr_model_quota.py"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["python3", "herdr_model_quota.py"]
