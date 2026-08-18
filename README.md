@@ -79,17 +79,25 @@ rows = [
 Requirements: Python 3.11+, Herdr 0.8+, and `codex` on `PATH`. Claude support
 additionally requires macOS with the Claude Code CLI signed in.
 
-1. Clone this repository anywhere you like, for example
-   `git clone <repository-url> ~/src/herdr-model-quota`.
-2. Link the plugin: `herdr plugin link /path/to/herdr-model-quota`.
-3. Add the sidebar configuration above and run `herdr server reload-config`.
-4. Populate both values with
-   `herdr plugin action invoke terry.herdr-model-quota.refresh`.
+Install the pinned release from GitHub:
+
+```bash
+herdr plugin install terry-li-hm/herdr-model-quota --ref v2.1.0
+```
+
+Then add the sidebar configuration above, run `herdr server reload-config`, and
+populate both values with
+`herdr plugin action invoke terry.herdr-model-quota.refresh`.
+
+Track `main` only if you accept unreleased changes. For local development,
+clone the repository and use `herdr plugin link /path/to/herdr-model-quota`
+instead of installing.
 
 ## Rollback
 
 Run `herdr plugin action invoke terry.herdr-model-quota.clear`, then
-`herdr plugin unlink terry.herdr-model-quota` and reload Herdr. The normalized
+`herdr plugin uninstall terry.herdr-model-quota` (or `herdr plugin unlink` for a
+linked checkout) and reload Herdr. The normalized
 cache remains under the Herdr-managed plugin state directory and contains no
 credentials; deleting that directory removes every trace.
 

@@ -2,7 +2,7 @@ id = "terry.herdr-model-quota"
 name = "Model Quota"
 version = "2.1.0"
 min_herdr_version = "0.8.0"
-description = "Show Codex and Claude Max subscription capacity in the focused workspace row"
+description = "Show Codex and Claude Max subscription capacity in the focused workspace row. Claude support is experimental, macOS-only, and reads an undocumented Anthropic endpoint."
 platforms = ["macos", "linux"]
 
 [[startup]]

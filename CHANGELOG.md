@@ -10,6 +10,9 @@
   the `five_hour`, `seven_day`, and `seven_day_sonnet` windows.
 - Apache-2.0 `LICENSE`, `SECURITY.md`, and a GitHub Actions verifier for
   Python 3.11 and 3.13.
+- Documented installation as a pinned `herdr plugin install` release, and
+  carried the Claude experimental, macOS-only, undocumented-endpoint caveat
+  into the plugin manifest description so it reaches a marketplace card.
 
 ### Changed
 
