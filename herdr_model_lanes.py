@@ -3,8 +3,9 @@
 Codex is queried through its local app-server. Claude Max, Grok, GLM,
 Antigravity, and Kimi Code usage each come from a bundled helper subprocess
 that is the sole credential boundary for that provider. The argparse CLI
-exposes ``refresh``, ``clear``, ``route``, and ``ag``. This plugin sees
-only normalized usage JSON and never credentials.
+exposes ``refresh``, ``clear``, ``route``, and ``ag`` (including
+``ag usage``). This plugin sees only normalized usage JSON and never
+credentials.
 """
 
 from __future__ import annotations
@@ -155,6 +156,17 @@ class RefreshOutcome:
     kimi_stale: bool = False
     cursor: CursorUsage | None = None
     cursor_stale: bool = False
+
+
+@dataclass(frozen=True)
+class UsageRow:
+    """One provider's row for ``ag usage``; carries only normalized quota."""
+
+    name: str
+    label: str
+    window: QuotaWindow | None
+    stale: bool
+    error: str | None
 
 
 # ---------------------------------------------------------------------------
@@ -1779,6 +1791,7 @@ def _ag_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
             "  ag high\n"
             "  ag --classified\n"
             "  ag medium -y\n"
+            "  ag usage [--json] [--refresh]\n"
             "\n"
             "Environment: AG_YES=1 skips the prompt; AG_TIMEOUT seconds until "
             "auto-accept (default 10)."
@@ -1983,6 +1996,152 @@ def _ensure_ag_state_dir() -> None:
     )
 
 
+def _grok_login_exists() -> bool:
+    return Path.home().joinpath(".grok", "auth.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# ag usage: consolidated per-provider quota rows
+# ---------------------------------------------------------------------------
+
+
+def collect_usage(force: bool, state_dir: Path, now: int) -> list[UsageRow]:
+    """Read each configured provider through its existing cached reader."""
+    specs = (
+        (
+            "claude",
+            "Cl",
+            lambda: True,
+            _refresh_claude,
+            CLAUDE_CACHE_FILENAME,
+            lambda usage: usage.weekly,
+        ),
+        (
+            "grok",
+            "Gk",
+            _grok_login_exists,
+            _refresh_grok,
+            GROK_CACHE_FILENAME,
+            lambda usage: usage.weekly,
+        ),
+        (
+            "glm",
+            "Gl",
+            glm_usage.key_available,
+            _refresh_glm,
+            GLM_CACHE_FILENAME,
+            lambda usage: usage.five_hour,
+        ),
+        (
+            "antigravity",
+            "Ag",
+            antigravity_usage.probe_available,
+            _refresh_antigravity,
+            ANTIGRAVITY_CACHE_FILENAME,
+            lambda usage: usage.gemini,
+        ),
+        (
+            "kimi",
+            "Km",
+            kimi_usage.key_available,
+            _refresh_kimi,
+            KIMI_CACHE_FILENAME,
+            lambda usage: usage.coding,
+        ),
+        (
+            "cursor",
+            "Cu",
+            cursor_usage.key_available,
+            _refresh_cursor,
+            CURSOR_CACHE_FILENAME,
+            lambda usage: usage.monthly,
+        ),
+    )
+    rows = []
+    for name, label, configured, refresh_fn, cache_name, window_of in specs:
+        if not configured():
+            continue
+        try:
+            usage, stale, error = refresh_fn(force, state_dir / cache_name, now, None)
+        except Exception as exc:  # noqa: BLE001 - one reader's bug must not hide the others
+            usage, stale, error = None, False, type(exc).__name__
+        rows.append(
+            UsageRow(
+                name,
+                label,
+                window_of(usage) if usage is not None else None,
+                stale,
+                error,
+            )
+        )
+    return rows
+
+
+def _usage_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="ag usage",
+        description=(
+            "Print one row per configured provider with remaining percentage "
+            "and reset time. Providers: Claude, Grok, GLM, Antigravity, Kimi "
+            "Code, Cursor. A failed provider shows n/a with its error; the "
+            "exit code is nonzero only if every provider fails."
+        ),
+        add_help=add_help,
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_mode",
+        help="Emit a stable machine-readable object instead of rows",
+    )
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Bypass each reader's cache and query the provider now",
+    )
+    return parser
+
+
+def usage_command(argv: list[str], now: int | None = None) -> int:
+    """``ag usage [--json] [--refresh]``: one row per configured provider."""
+    parser = _usage_parser()
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        return int(exc.code or 0)
+    if now is None:
+        now = int(time.time())
+    _ensure_ag_state_dir()
+    state_dir = state_dir_from_env()
+    if state_dir is None:  # defensive: _ensure_ag_state_dir always sets one
+        print("ag usage: no state dir", file=sys.stderr)
+        return 1
+    rows = collect_usage(args.refresh, state_dir, now)
+    if args.json_mode:
+        providers = {
+            row.name: {
+                "remaining_percent": (
+                    row.window.remaining_percent if row.window is not None else None
+                ),
+                "resets_at": row.window.resets_at if row.window is not None else None,
+                "stale": row.stale,
+                "error": row.error,
+            }
+            for row in rows
+        }
+        print(json.dumps({"providers": providers}, indent=2))
+    else:
+        for row in rows:
+            if row.window is not None:
+                print(_format_window(row.label, row.window, now, row.stale))
+            else:
+                detail = f" ({row.error})" if row.error else ""
+                print(f"{row.label} n/a{detail}")
+    if all(row.window is None for row in rows):
+        return 1
+    return 0
+
+
 def ag_command(
     argv: list[str],
     herdr_bin: str = "herdr",
@@ -1990,7 +2149,9 @@ def ag_command(
     exec_fn=os.execvp,
     choice_fn=None,
 ) -> int:
-    """``ag [CLASS] [--explain] [--classified] [-y]``."""
+    """``ag [CLASS] [--explain] [--classified] [-y]`` or ``ag usage``."""
+    if argv[:1] == ["usage"]:
+        return usage_command(argv[1:], now=now)
     parser = _ag_parser()
     try:
         args = parser.parse_args(argv)
@@ -2074,7 +2235,7 @@ def ag_command(
 
 
 def _cmd_refresh(force: bool) -> int:
-    include_grok = Path.home().joinpath(".grok", "auth.json").exists()
+    include_grok = _grok_login_exists()
     refresh(
         force=force,
         include_grok=include_grok,
@@ -2095,6 +2256,9 @@ def main(argv: list[str]) -> int:
         return 0
     if argv[0] not in {"refresh", "clear", "route", "ag"}:
         argv = ["refresh", *argv]
+    if argv[:2] == ["ag", "usage"]:
+        # usage has its own flags (--json/--refresh) the ag parser must not see
+        return usage_command(argv[2:])
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:

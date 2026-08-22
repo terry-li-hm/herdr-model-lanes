@@ -204,6 +204,14 @@ when unset. Install it as a symlink so updates are picked up:
 ln -s "$PWD/bin/ag" ~/.local/bin/ag
 ```
 
+`ag usage` prints one row per configured provider (Claude, Grok, GLM,
+Antigravity, Kimi Code, Cursor) with remaining percentage and reset
+countdown, reusing the same cached readers; `--json` emits a stable
+machine-readable object keyed by provider name, and `--refresh` bypasses
+each reader's cache. A failed provider prints `n/a` with its error without
+suppressing the others; the exit code is nonzero only if every provider
+fails or the invocation is invalid.
+
 Kill rule: if Herdr's plugin action log shows no `route` invocation in the
 two weeks after landing, delete the route action.
 
