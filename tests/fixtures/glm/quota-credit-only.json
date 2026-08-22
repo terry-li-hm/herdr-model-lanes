@@ -1,0 +1,18 @@
+{
+  "success": true,
+  "code": 200,
+  "data": {
+    "limits": [
+      {
+        "type": "CREDIT_LIMIT",
+        "unit": "credit",
+        "number": 100,
+        "percentage": 25,
+        "usage": 25,
+        "currentValue": 25,
+        "remaining": 75,
+        "nextResetTime": 1790726400000
+      }
+    ]
+  }
+}

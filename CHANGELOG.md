@@ -1,5 +1,19 @@
 # Changelog
 
+## 3.2.0 - 2026-08-22
+
+### Added
+
+- GLM (Z.ai / bigmodel coding plan) quota reader: the bundled `glm_usage.py`
+  helper is the sole credential boundary, reading the key from the `ZHIPU_API_KEY`/
+  `ZHIPUAI_API_KEY`/`ZAI_API_KEY`/`ZAI_KEY`/`BIGMODEL_API_KEY`/`GLM_API_KEY`
+  environment order, then `~/.pi/agent/models.json`, then the Zhipu/BigModel
+  config key files, and printing only the normalized five-hour token window from
+  `{base}/api/monitor/usage/quota/limit`. `QuotaWindow` gained an explicit
+  `window_seconds` (weekly by default, five hours for GLM) so `_lane_health`
+  judges each window on its own pace; the `Gl` segment refreshes at a five-minute
+  cadence and the `glm` lane is routable when it is the healthy choice.
+
 ## 3.1.0 - 2026-08-22
 
 `ag` and the readers work without Herdr: `MODEL_LANES_STATE_DIR` is honoured when

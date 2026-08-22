@@ -49,6 +49,22 @@ segment uses the same `!`/`!!`/`~` rules and 30-minute cadence as Claude with
 its own atomic cache, shows `Gk n/a` when the helper cannot run, and appears
 only when a Grok login exists on the machine.
 
+GLM (Z.ai / bigmodel coding plan) quota comes from the bundled `glm_usage.py`
+helper in the same shape. It is the sole credential boundary for GLM: the key
+is looked up from `ZHIPU_API_KEY`, `ZHIPUAI_API_KEY`, `ZAI_API_KEY`, `ZAI_KEY`,
+`BIGMODEL_API_KEY`, or `GLM_API_KEY` in the environment, then
+`~/.pi/agent/models.json` (`providers["bigmodel-coding"]["apiKey"]`, a literal
+key; `$`-prefixed references are ignored), then the first line of
+`~/.config/zhipu/api_key` or `~/.config/bigmodel/api_key`. The helper calls
+`GET {base}/api/monitor/usage/quota/limit` with `Authorization: Bearer <key>`
+and prints only the normalized five-hour token window (the `TOKENS_LIMIT`
+entry with the nearest reset). The base is `https://open.bigmodel.cn` when the
+key came from a Zhipu/BigModel source and `https://api.z.ai` otherwise,
+overridable with `MODEL_LANES_GLM_BASE`. No key is ever stored, logged, or
+cached. The `Gl` segment uses the same `!`/`!!`/`~` rules, refreshes at a
+five-minute cadence (the window is five hours), shows `Gl n/a` when no key is
+available, and the router judges it on a five-hour pace, not a weekly one.
+
 ## Refresh, caching, and failure behavior
 
 Codex refreshes at most every five minutes. Claude refreshes at most every 30
@@ -112,7 +128,7 @@ For each lane the router computes
    order");
 3. otherwise the lane with the highest health ("least unhealthy lane").
 
-A lane whose quota has no reader (`glm`, `cursor`) is `n/a` and ranks last,
+A lane whose quota has no reader (`cursor`) is `n/a` and ranks last,
 so Cursor is the last resort and never chosen while any other lane is
 healthy. `--explain` prints one line per lane plus the pick and shows it as
 a Herdr notification (non-fatal without Herdr); `--launch` additionally
@@ -142,12 +158,13 @@ two weeks after landing, delete the route action.
 
 Requirements: Python 3.11+, Herdr 0.8+, and `codex` on `PATH`. Claude support
 additionally requires macOS with the Claude Code CLI signed in. Grok support
-additionally requires a Grok CLI login under `~/.grok`.
+additionally requires a Grok CLI login under `~/.grok`. GLM support
+additionally requires a Z.ai/BigModel API key from one of the sources above.
 
 Install the pinned release from GitHub:
 
 ```bash
-herdr plugin install terry-li-hm/herdr-model-lanes --ref v3.1.0
+herdr plugin install terry-li-hm/herdr-model-lanes --ref v3.2.0
 ```
 
 Then add the sidebar configuration above, run `herdr server reload-config`, and

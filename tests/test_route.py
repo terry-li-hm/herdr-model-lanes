@@ -310,6 +310,130 @@ class GrokRefreshTests(unittest.TestCase):
         self.assertIn("Gk n/a", publish.call_args.args[0])
 
 
+class GlmTests(unittest.TestCase):
+    def test_parse_glm_usage_from_helper_shape(self) -> None:
+        payload = {
+            "five_hour": {
+                "used_percent": 38,
+                "remaining_percent": 62,
+                "resets_at": 1_787_356_800,
+            }
+        }
+
+        usage = quota.parse_glm_usage(payload, fetched_at=NOW)
+
+        self.assertEqual(usage.five_hour.remaining_percent, 62)
+        self.assertEqual(usage.five_hour.window_seconds, quota.GLM_WINDOW_SECONDS)
+
+    def test_rejects_missing_five_hour_window(self) -> None:
+        with self.assertRaisesRegex(quota.QuotaError, "five_hour"):
+            quota.parse_glm_usage({"five_hour": None}, fetched_at=NOW)
+
+    def test_formats_gl_segment_after_gk(self) -> None:
+        glm = quota.GlmUsage(
+            quota.QuotaWindow(38, 62, NOW + 4 * 3_600, quota.GLM_WINDOW_SECONDS), NOW
+        )
+
+        self.assertEqual(
+            quota.format_quota(None, None, NOW, grok=None, glm=glm),
+            "Cx n/a | Cl n/a | Gk n/a | Gl 62% · 4h",
+        )
+
+    def test_gl_marks_low_remaining_and_stale(self) -> None:
+        glm = quota.GlmUsage(
+            quota.QuotaWindow(92, 8, NOW + 3_600, quota.GLM_WINDOW_SECONDS), NOW
+        )
+
+        self.assertEqual(
+            quota.format_quota(None, None, NOW, glm=glm, glm_stale=True),
+            "Cx n/a | Cl n/a | Gl 8%!!~ · 1h",
+        )
+
+    def test_gl_na_when_no_key(self) -> None:
+        self.assertEqual(
+            quota.format_quota(None, None, NOW, glm=None),
+            "Cx n/a | Cl n/a | Gl n/a",
+        )
+
+    def test_glm_cache_round_trip(self) -> None:
+        usage = quota.GlmUsage(
+            quota.QuotaWindow(38, 62, NOW + 10_000, quota.GLM_WINDOW_SECONDS), NOW
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / quota.GLM_CACHE_FILENAME
+            quota.save_glm_cache(path, usage)
+
+            self.assertEqual(quota.load_glm_cache(path), usage)
+            self.assertEqual(
+                set(json.loads(path.read_text())), {"five_hour", "fetched_at"}
+            )
+
+    def test_route_picks_glm_when_it_is_the_only_healthy_lane(self) -> None:
+        spec = medium_spec()
+        # glm: 80% left with 4h of a five-hour window -> health 1.0+, while
+        # the weekly lanes are drained and cursor has no reader.
+        quotas = {
+            "codex": window(5, WEEK),
+            "grok": window(5, WEEK),
+            "claude": window(5, WEEK),
+            "glm": quota.QuotaWindow(20, 80, NOW + 4 * 3_600, quota.GLM_WINDOW_SECONDS),
+            "cursor": None,
+        }
+
+        lane, lines = quota.select_lane(spec, quotas, NOW)
+
+        self.assertEqual(lane.name, "glm")
+        self.assertIn("pick: glm", lines[-1])
+
+    def test_five_hour_window_judged_on_its_own_pace(self) -> None:
+        # 80% left with 4h of a five-hour window is healthy (0.8 < 1) so it
+        # falls to the least-unhealthy branch, while the same numbers on a
+        # weekly window would rank far lower.
+        weekly = window(80, WEEK)
+        five_hour = quota.QuotaWindow(20, 80, NOW + 4 * 3_600, quota.GLM_WINDOW_SECONDS)
+
+        self.assertGreater(
+            quota._lane_health(five_hour, NOW), quota._lane_health(weekly, NOW)
+        )
+
+    @mock.patch("herdr_model_lanes.query_glm")
+    def test_glm_refreshes_on_five_minute_cadence(self, query_glm: mock.Mock) -> None:
+        cached = quota.GlmUsage(
+            quota.QuotaWindow(38, 62, NOW + 10_000, quota.GLM_WINDOW_SECONDS),
+            NOW - 1_000,
+        )
+        query_glm.return_value = quota.GlmUsage(
+            quota.QuotaWindow(38, 62, NOW + 20_000, quota.GLM_WINDOW_SECONDS), NOW
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / quota.GLM_CACHE_FILENAME
+            quota.save_glm_cache(path, cached)
+            within = quota._refresh_glm(False, path, NOW - 1_000 + 200, None)
+            outside = quota._refresh_glm(False, path, NOW - 1_000 + 301, None)
+
+        self.assertEqual(within[0], cached)
+        self.assertEqual(outside[0].five_hour.remaining_percent, 62)
+        query_glm.assert_called_once()
+
+    @mock.patch("herdr_model_lanes.publish_to_focused_workspace")
+    @mock.patch("herdr_model_lanes.query_codex")
+    @mock.patch("herdr_model_lanes.query_glm")
+    def test_refresh_includes_gl_segment_only_when_enabled(
+        self, query_glm: mock.Mock, query_codex: mock.Mock, publish: mock.Mock
+    ) -> None:
+        query_glm.side_effect = quota.QuotaError("GLM offline")
+        query_codex.side_effect = quota.QuotaError("Codex offline")
+
+        with tempfile.TemporaryDirectory() as directory:
+            outcome = quota.refresh(
+                state_dir=Path(directory), now=NOW, include_glm=True
+            )
+
+        self.assertIsNone(outcome.glm)
+        self.assertIn("Gl n/a", publish.call_args.args[0])
+
+
 class RouteCommandTests(unittest.TestCase):
     @mock.patch("herdr_model_lanes._run_herdr_command")
     @mock.patch("herdr_model_lanes.refresh")

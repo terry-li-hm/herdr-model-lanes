@@ -27,6 +27,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+import glm_usage
+
 WEEKLY_WINDOW_MINS = 10_080
 WEEKLY_TOLERANCE_MINS = 240
 CODEX_REFRESH_INTERVAL_SECS = 300
@@ -36,6 +38,9 @@ SUBPROCESS_TIMEOUT_SECS = 15
 CLAUDE_HELPER_TIMEOUT_SECS = 12
 GROK_REFRESH_INTERVAL_SECS = 1_800
 GROK_HELPER_TIMEOUT_SECS = 12
+GLM_WINDOW_SECONDS = 5 * 3_600
+GLM_REFRESH_INTERVAL_SECS = 300
+GLM_HELPER_TIMEOUT_SECS = 12
 LAUNCH_TIMEOUT_SECS = 30
 PLUGIN_ID = "terry.herdr-model-lanes"
 TOKEN_NAME = "model_quota"
@@ -43,6 +48,7 @@ TOKEN_TTL_MS = 2 * 60 * 60 * 1000
 CODEX_CACHE_FILENAME = "codex-quota.json"
 CLAUDE_CACHE_FILENAME = "claude-quota.json"
 GROK_CACHE_FILENAME = "grok-quota.json"
+GLM_CACHE_FILENAME = "glm-quota.json"
 CLASSES_FILENAME = "classes.toml"
 ROUTE_WINDOW_SECONDS = 604_800
 SURPLUS_HEALTH = 2.0
@@ -68,6 +74,7 @@ class QuotaWindow:
     used_percent: int
     remaining_percent: int
     resets_at: int | None
+    window_seconds: int = ROUTE_WINDOW_SECONDS
 
 
 @dataclass(frozen=True)
@@ -93,6 +100,12 @@ class GrokUsage:
 
 
 @dataclass(frozen=True)
+class GlmUsage:
+    five_hour: QuotaWindow
+    fetched_at: int
+
+
+@dataclass(frozen=True)
 class RefreshOutcome:
     codex: CodexUsage | None
     claude: ClaudeUsage | None
@@ -101,6 +114,8 @@ class RefreshOutcome:
     errors: tuple[str, ...] = ()
     grok: GrokUsage | None = None
     grok_stale: bool = False
+    glm: GlmUsage | None = None
+    glm_stale: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +211,37 @@ def _parse_grok_window(value: object, field: str) -> QuotaWindow | None:
     return QuotaWindow(used, remaining, resets_at)
 
 
+def _parse_glm_window(value: object, field: str) -> QuotaWindow | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise QuotaError(f"{field} window is not an object")
+    used, remaining = _percent(value.get("used_percent"), f"{field} used percentage")
+    resets_at = value.get("resets_at")
+    if resets_at is not None and (
+        not isinstance(resets_at, (int, float)) or isinstance(resets_at, bool)
+    ):
+        raise QuotaError(f"{field} resets_at is not a unix timestamp")
+    return QuotaWindow(
+        used,
+        remaining,
+        None if resets_at is None else int(resets_at),
+        window_seconds=GLM_WINDOW_SECONDS,
+    )
+
+
+def parse_glm_usage(payload: dict, fetched_at: int) -> GlmUsage:
+    """Parse the normalized, credential-free output of the GLM helper."""
+    if not isinstance(payload, dict):
+        raise QuotaError("GLM helper payload is not an object")
+    five_hour = _parse_glm_window(payload.get("five_hour"), "GLM five_hour")
+    if five_hour is None:
+        raise QuotaError("GLM helper payload has no five_hour window")
+    if five_hour.resets_at is None:
+        raise QuotaError("GLM helper five_hour window has no reset timestamp")
+    return GlmUsage(five_hour=five_hour, fetched_at=fetched_at)
+
+
 def _parse_claude_window(value: object, field: str) -> QuotaWindow | None:
     if value is None:
         return None
@@ -269,6 +315,8 @@ def format_quota(
     claude_stale: bool = False,
     grok: GrokUsage | None | object = UNSET,
     grok_stale: bool = False,
+    glm: GlmUsage | None | object = UNSET,
+    glm_stale: bool = False,
 ) -> str:
     codex_text = "Cx n/a"
     if codex is not None:
@@ -296,6 +344,12 @@ def format_quota(
         if grok_usage is not None:
             grok_text = _format_window("Gk", grok_usage.weekly, now, grok_stale)
         line += f" | {grok_text}"
+    if glm is not UNSET:
+        glm_usage_obj = glm if isinstance(glm, GlmUsage) else None
+        glm_text = "Gl n/a"
+        if glm_usage_obj is not None:
+            glm_text = _format_window("Gl", glm_usage_obj.five_hour, now, glm_stale)
+        line += f" | {glm_text}"
     return line
 
 
@@ -416,6 +470,24 @@ def load_grok_cache(path: Path) -> GrokUsage | None:
             return None
         return GrokUsage(weekly, int(raw["fetched_at"]))
     except (OSError, KeyError, TypeError, ValueError):
+        return None
+
+
+def save_glm_cache(path: Path, usage: GlmUsage) -> None:
+    _save_json(
+        path,
+        {"five_hour": _window_to_dict(usage.five_hour), "fetched_at": usage.fetched_at},
+    )
+
+
+def load_glm_cache(path: Path) -> GlmUsage | None:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        five_hour = _parse_glm_window(raw["five_hour"], "GLM five_hour")
+        if five_hour is None or five_hour.resets_at is None:
+            return None
+        return GlmUsage(five_hour, int(raw["fetched_at"]))
+    except (OSError, KeyError, TypeError, ValueError, QuotaError):
         return None
 
 
@@ -652,6 +724,37 @@ def query_grok(
     return parse_grok_usage(payload, fetched_at=now)
 
 
+def default_glm_command() -> list[str]:
+    """Default GLM helper invocation: current interpreter, bundled module."""
+    return [sys.executable, str(Path(__file__).with_name("glm_usage.py"))]
+
+
+def query_glm(now: int | None = None, glm_command: list[str] | None = None) -> GlmUsage:
+    """Obtain normalized GLM usage from the bundled helper subprocess."""
+    if now is None:
+        now = int(time.time())
+    command = glm_command if glm_command is not None else default_glm_command()
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=GLM_HELPER_TIMEOUT_SECS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise QuotaError(
+            f"cannot obtain GLM usage from helper: {type(exc).__name__}"
+        ) from exc
+    if completed.returncode != 0:
+        raise QuotaError(f"GLM helper failed with rc={completed.returncode}")
+    try:
+        payload = json.loads(completed.stdout)
+    except ValueError as exc:
+        raise QuotaError("GLM helper returned invalid JSON") from exc
+    return parse_glm_usage(payload, fetched_at=now)
+
+
 def _herdr(herdr_bin: str, args: list[str]) -> dict:
     completed = subprocess.run(
         [herdr_bin, *args],
@@ -804,6 +907,35 @@ def _refresh_grok(
             return cached, cached is not None, str(exc)
 
 
+def _refresh_glm(
+    force: bool,
+    cache_path: Path,
+    now: int,
+    glm_command: list[str] | None,
+) -> tuple[GlmUsage | None, bool, str | None]:
+    with _cache_lock(cache_path):
+        cached = _discard_expired(cache_path, load_glm_cache(cache_path), now)
+        attempted_at = _load_attempt(_attempt_path(cache_path))
+        freshness = max(
+            cached.fetched_at if cached is not None else 0,
+            attempted_at or 0,
+        )
+        if not force and freshness and now - freshness < GLM_REFRESH_INTERVAL_SECS:
+            failed_after_cache = (
+                cached is not None
+                and attempted_at is not None
+                and attempted_at > cached.fetched_at
+            )
+            return cached, failed_after_cache, None
+        _save_attempt(_attempt_path(cache_path), now)
+        try:
+            usage = query_glm(now=now, glm_command=glm_command)
+            save_glm_cache(cache_path, usage)
+            return usage, False, None
+        except QuotaError as exc:
+            return cached, cached is not None, str(exc)
+
+
 def state_dir_from_env() -> Path | None:
     """Resolve the cache directory: Herdr's variable first, then the standalone one."""
     for name in ("HERDR_PLUGIN_STATE_DIR", "MODEL_LANES_STATE_DIR"):
@@ -822,6 +954,8 @@ def refresh(
     claude_command: list[str] | None = None,
     grok_command: list[str] | None = None,
     include_grok: bool = False,
+    glm_command: list[str] | None = None,
+    include_glm: bool = False,
     emit: bool = True,
 ) -> RefreshOutcome:
     if now is None:
@@ -846,6 +980,13 @@ def refresh(
         grok, grok_stale, grok_error = _refresh_grok(
             force, state_dir / GROK_CACHE_FILENAME, now, grok_command
         )
+    glm: GlmUsage | None = None
+    glm_stale = False
+    glm_error: str | None = None
+    if include_glm:
+        glm, glm_stale, glm_error = _refresh_glm(
+            force, state_dir / GLM_CACHE_FILENAME, now, glm_command
+        )
     line = format_quota(
         codex,
         claude,
@@ -854,12 +995,24 @@ def refresh(
         claude_stale,
         grok if include_grok else UNSET,
         grok_stale,
+        glm if include_glm else UNSET,
+        glm_stale,
     )
     publish_to_focused_workspace(line, herdr_bin=herdr_bin)
     print(line, file=sys.stdout if emit else sys.stderr, flush=True)
-    errors = tuple(error for error in (codex_error, claude_error, grok_error) if error)
+    errors = tuple(
+        error for error in (codex_error, claude_error, grok_error, glm_error) if error
+    )
     return RefreshOutcome(
-        codex, claude, codex_stale, claude_stale, errors, grok, grok_stale
+        codex,
+        claude,
+        codex_stale,
+        claude_stale,
+        errors,
+        grok,
+        grok_stale,
+        glm,
+        glm_stale,
     )
 
 
@@ -922,7 +1075,10 @@ def _lane_health(window: QuotaWindow | None, now: int) -> float | None:
     """quota_left / time_left; ``None`` ranks the lane last."""
     if window is None or window.resets_at is None:
         return None
-    time_left = max((window.resets_at - now) / ROUTE_WINDOW_SECONDS, 1e-9)
+    time_left = max(
+        (window.resets_at - now) / window.window_seconds,
+        1e-9,
+    )
     quota_left = max(0, min(100, window.remaining_percent)) / 100
     return quota_left / time_left
 
@@ -1138,12 +1294,14 @@ def route_command(
         now=now,
         herdr_bin=herdr_bin,
         include_grok=True,
+        include_glm=True,
         emit=not argv_mode,
     )
     quotas: dict[str, QuotaWindow | None] = {
         "codex": outcome.codex.weekly if outcome.codex else None,
         "claude": outcome.claude.weekly if outcome.claude else None,
         "grok": outcome.grok.weekly if outcome.grok else None,
+        "glm": outcome.glm.five_hour if outcome.glm else None,
     }
     lane, rationale = select_lane(class_spec, quotas, now, classified=classified)
     stream = sys.stderr if argv_mode else sys.stdout
@@ -1171,7 +1329,11 @@ def main(argv: list[str]) -> int:
             print(f"route error: {exc}", file=sys.stderr)
             return 1
     include_grok = Path.home().joinpath(".grok", "auth.json").exists()
-    refresh(force="--force" in argv, include_grok=include_grok)
+    refresh(
+        force="--force" in argv,
+        include_grok=include_grok,
+        include_glm=glm_usage.key_available(),
+    )
     return 0
 
 

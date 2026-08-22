@@ -1,0 +1,28 @@
+{
+  "success": true,
+  "code": 200,
+  "data": {
+    "limits": [
+      {
+        "type": "TOKENS_LIMIT",
+        "unit": "token",
+        "number": 1000000,
+        "percentage": 37.5,
+        "usage": 375000,
+        "currentValue": 375000,
+        "remaining": 625000,
+        "nextResetTime": 1787356800000
+      },
+      {
+        "type": "TIME_LIMIT",
+        "unit": "request",
+        "number": 100,
+        "percentage": 12,
+        "usage": 12,
+        "currentValue": 12,
+        "remaining": 88,
+        "nextResetTime": 1787443200000
+      }
+    ]
+  }
+}

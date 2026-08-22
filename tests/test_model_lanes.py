@@ -384,7 +384,7 @@ class ManifestTests(unittest.TestCase):
         manifest = tomllib.loads(Path("herdr-plugin.toml").read_text())
 
         self.assertEqual(manifest["id"], "terry.herdr-model-lanes")
-        self.assertEqual(manifest["version"], "3.1.0")
+        self.assertEqual(manifest["version"], "3.2.0")
         self.assertEqual(manifest["min_herdr_version"], "0.8.0")
         self.assertEqual(manifest["platforms"], ["macos", "linux"])
         self.assertNotIn("build", manifest)
