@@ -112,11 +112,13 @@ the manifest. Two classes exist:
 - **`high`** — Fable 5 (`claude --model claude-fable-5`, quota claude), then
   Sol 5.6 (`pi` on `openai-codex`/`gpt-5.6-sol`, quota codex). Fable keeps
   the Claude Max window as its headroom.
-- **`medium`** — Sol 5.6, Grok 4.6 (grok), Opus 5 (`claude --model
-  claude-opus-5`, quota claude), GLM-5.3 (`pi` on `bigmodel-coding`, quota
-  glm, not classified-safe), Cursor Agent (cursor, quota cursor). Opus sits
-  after Sol and Grok because Fable and Opus share the one Claude Max window;
-  medium spends the independent pools first so high keeps its headroom.
+- **`medium`** — Sol 5.6, Opus 5 (`claude --model claude-opus-5`, quota
+  claude), GLM-5.3 (`pi` on `bigmodel-coding`, quota glm, not
+  classified-safe), Grok 4.6 (grok), Cursor Agent (cursor, quota cursor). The
+  order follows Terminal-Bench 3.0 and vendor cards (Opus 5 42.7 vs Grok 4.6
+  26.5; GLM-5.3 28–32); Fable and Opus share the one Claude Max window, so the
+  health gate, not order, protects `high`: Opus is picked only while Claude is
+  on pace and above 20%.
 
 For each lane the router computes
 `health = (remaining/100) / ((resets_at - now) / window_seconds)` and picks:

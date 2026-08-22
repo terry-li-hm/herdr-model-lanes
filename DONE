@@ -1,1 +1,0 @@
-QA pass on qa/grok-review complete. Five confirmed bugs fixed with regression tests. Verifier green: 106 tests OK, ruff check/format clean, `sh -n bin/ag` clean. See REPORT.md. Not pushed.

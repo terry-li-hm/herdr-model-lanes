@@ -1,13 +1,17 @@
-# Python
+
 __pycache__/
-*.py[cod]
+.pane
 .pytest_cache/
 .ruff_cache/
-
-# Plugin runtime state
-*.tmp
-*.json.lock
 *.attempt.json
-codex-quota.json
+*.json.lock
+*.py[cod]
+*.tmp
+# Plugin runtime state
+# Python
 claude-quota.json
-.pane
+codex-quota.json
+CONTRACT.md
+DONE
+REPORT.md
+SPEC.md
