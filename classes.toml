@@ -16,20 +16,13 @@ quota = "codex"
 classified_ok = true
 
 [classes.medium]
-description = "Sol on Codex, Grok 4.6 on SuperGrok, Opus 5 on Claude Max, GLM-5.3, Cursor Agent"
+description = "Sol on Codex, Opus 5 on Claude Max, GLM-5.3, Grok 4.6 on SuperGrok, Cursor Agent"
 
 [[classes.medium.lanes]]
 name = "sol"
 kind = "pi"
 args = ["--provider", "openai-codex", "--model", "gpt-5.6-sol"]
 quota = "codex"
-classified_ok = true
-
-[[classes.medium.lanes]]
-name = "grok"
-kind = "grok"
-args = []
-quota = "grok"
 classified_ok = true
 
 [[classes.medium.lanes]]
@@ -45,6 +38,13 @@ kind = "pi"
 args = ["--provider", "bigmodel-coding", "--model", "glm-5.3"]
 quota = "glm"
 classified_ok = false
+
+[[classes.medium.lanes]]
+name = "grok"
+kind = "grok"
+args = []
+quota = "grok"
+classified_ok = true
 
 [[classes.medium.lanes]]
 name = "cursor"
