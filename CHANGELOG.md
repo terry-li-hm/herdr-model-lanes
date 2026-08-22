@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.0.0 - 2026-08-22
+
+Renamed from `herdr-model-lanes` to `herdr-model-lanes`: the plugin id is now
+`terry.herdr-model-lanes`, the module is `herdr_model_lanes.py`, and the state
+directory moves with the id. This is a breaking change for existing installs:
+uninstall `terry.herdr-model-lanes`, then install `terry-li-hm/herdr-model-lanes`.
+Behaviour is unchanged from 2.3.x (three quota readers, two classes, `ag`).
+
 ## 2.3.0 - 2026-08-22
 
 ### Added

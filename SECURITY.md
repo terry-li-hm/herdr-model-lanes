@@ -2,7 +2,7 @@
 
 ## Trust model and credential boundary
 
-This plugin is credential-blind. `herdr_model_quota.py` never reads the macOS
+This plugin is credential-blind. `herdr_model_lanes.py` never reads the macOS
 Keychain, never constructs an `Authorization` header, and never sees an OAuth
 token. It queries the local Codex app-server over stdio and runs one bounded
 helper subprocess for Claude usage.

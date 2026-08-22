@@ -1,4 +1,4 @@
-# herdr-model-quota
+# herdr-model-lanes
 
 Herdr 0.8 plugin that shows the remaining weekly subscription capacity for
 **ChatGPT Codex** and **Claude Max** in the focused workspace row. A normal
@@ -128,7 +128,7 @@ happens once at launch; nothing re-routes a running pane.
 and `exec`s the chosen lane in the current pane — no new tab, own cwd,
 Herdr detects the agent normally. It sets
 `HERDR_PLUGIN_STATE_DIR` to
-`${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/terry.herdr-model-quota`
+`${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/terry.herdr-model-lanes`
 when unset. Install it as a symlink so updates are picked up:
 
 ```bash
@@ -147,21 +147,21 @@ additionally requires a Grok CLI login under `~/.grok`.
 Install the pinned release from GitHub:
 
 ```bash
-herdr plugin install terry-li-hm/herdr-model-quota --ref v2.3.0
+herdr plugin install terry-li-hm/herdr-model-lanes --ref v3.0.0
 ```
 
 Then add the sidebar configuration above, run `herdr server reload-config`, and
 populate both values with
-`herdr plugin action invoke terry.herdr-model-quota.refresh`.
+`herdr plugin action invoke terry.herdr-model-lanes.refresh`.
 
 Track `main` only if you accept unreleased changes. For local development,
-clone the repository and use `herdr plugin link /path/to/herdr-model-quota`
+clone the repository and use `herdr plugin link /path/to/herdr-model-lanes`
 instead of installing.
 
 ## Rollback
 
-Run `herdr plugin action invoke terry.herdr-model-quota.clear`, then
-`herdr plugin uninstall terry.herdr-model-quota` (or `herdr plugin unlink` for a
+Run `herdr plugin action invoke terry.herdr-model-lanes.clear`, then
+`herdr plugin uninstall terry.herdr-model-lanes` (or `herdr plugin unlink` for a
 linked checkout) and reload Herdr. The normalized
 cache remains under the Herdr-managed plugin state directory and contains no
 credentials; deleting that directory removes every trace.

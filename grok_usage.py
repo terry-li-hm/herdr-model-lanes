@@ -22,7 +22,7 @@ BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
 AUTH_FILENAME = Path.home() / ".grok" / "auth.json"
 FETCH_TIMEOUT_SECS = 5
 MAX_RESPONSE_BYTES = 1 << 20
-USER_AGENT = f"herdr-model-quota/{PLUGIN_VERSION} (Grok usage helper)"
+USER_AGENT = f"herdr-model-lanes/{PLUGIN_VERSION} (Grok usage helper)"
 WEEKLY_PERIOD_TYPE = "USAGE_PERIOD_TYPE_WEEKLY"
 
 

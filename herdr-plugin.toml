@@ -1,45 +1,45 @@
-id = "terry.herdr-model-quota"
-name = "Model Quota & Routing"
-version = "2.3.0"
+id = "terry.herdr-model-lanes"
+name = "Model Lanes"
+version = "3.0.0"
 min_herdr_version = "0.8.0"
 description = "Show Codex, Claude Max, and Grok subscription capacity in the focused workspace row, and route new agent tabs to a model class lane by remaining quota. Claude support is experimental, macOS-only, and reads an undocumented Anthropic endpoint."
 platforms = ["macos", "linux"]
 
 [[startup]]
-command = ["python3", "herdr_model_quota.py"]
+command = ["python3", "herdr_model_lanes.py"]
 
 [[actions]]
 id = "refresh"
 title = "Refresh model quotas"
-command = ["python3", "herdr_model_quota.py", "refresh", "--force"]
+command = ["python3", "herdr_model_lanes.py", "refresh", "--force"]
 
 [[actions]]
 id = "clear"
 title = "Clear model quotas"
-command = ["python3", "herdr_model_quota.py", "clear"]
+command = ["python3", "herdr_model_lanes.py", "clear"]
 
 [[actions]]
 id = "route-medium"
 title = "New agent: medium (Sol or Grok by quota)"
 contexts = ["workspace", "tab", "pane"]
-command = ["python3", "herdr_model_quota.py", "route", "medium", "--launch"]
+command = ["python3", "herdr_model_lanes.py", "route", "medium", "--launch"]
 
 [[actions]]
 id = "route-high"
 title = "New agent: high (Fable or Sol by quota)"
 contexts = ["workspace", "tab", "pane"]
-command = ["python3", "herdr_model_quota.py", "route", "high", "--launch"]
+command = ["python3", "herdr_model_lanes.py", "route", "high", "--launch"]
 
 [[actions]]
 id = "route-explain"
 title = "Show class routing"
 contexts = ["workspace", "tab", "pane"]
-command = ["python3", "herdr_model_quota.py", "route", "medium", "--explain"]
+command = ["python3", "herdr_model_lanes.py", "route", "medium", "--explain"]
 
 [[events]]
 on = "workspace.focused"
-command = ["python3", "herdr_model_quota.py"]
+command = ["python3", "herdr_model_lanes.py"]
 
 [[events]]
 on = "pane.agent_status_changed"
-command = ["python3", "herdr_model_quota.py"]
+command = ["python3", "herdr_model_lanes.py"]

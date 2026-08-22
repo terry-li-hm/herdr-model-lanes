@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import herdr_model_quota as quota
+import herdr_model_lanes as quota
 
 NOW = 1_700_000_000
 
@@ -200,7 +200,7 @@ class CacheTests(unittest.TestCase):
 
 
 class ClaudeQueryTests(unittest.TestCase):
-    @mock.patch("herdr_model_quota.subprocess.run")
+    @mock.patch("herdr_model_lanes.subprocess.run")
     def test_invokes_bounded_helper_and_parses_only_json_output(
         self, run: mock.Mock
     ) -> None:
@@ -227,7 +227,7 @@ class ClaudeQueryTests(unittest.TestCase):
         self.assertEqual(run.call_args.args[0], ["/trusted/claude-max-usage"])
         self.assertFalse(run.call_args.kwargs.get("shell", False))
 
-    @mock.patch("herdr_model_quota.subprocess.run")
+    @mock.patch("herdr_model_lanes.subprocess.run")
     def test_default_command_uses_bundled_helper_with_current_python(
         self, run: mock.Mock
     ) -> None:
@@ -256,7 +256,7 @@ class ClaudeQueryTests(unittest.TestCase):
 
 
 class PublicationTests(unittest.TestCase):
-    @mock.patch("herdr_model_quota.subprocess.run")
+    @mock.patch("herdr_model_lanes.subprocess.run")
     def test_publishes_only_on_focused_workspace(self, run: mock.Mock) -> None:
         run.side_effect = [
             mock.Mock(
@@ -290,9 +290,9 @@ class PublicationTests(unittest.TestCase):
 
 
 class RefreshTests(unittest.TestCase):
-    @mock.patch("herdr_model_quota.publish_to_focused_workspace")
-    @mock.patch("herdr_model_quota.query_claude")
-    @mock.patch("herdr_model_quota.query_codex")
+    @mock.patch("herdr_model_lanes.publish_to_focused_workspace")
+    @mock.patch("herdr_model_lanes.query_claude")
+    @mock.patch("herdr_model_lanes.query_codex")
     def test_refreshes_sources_on_independent_intervals(
         self,
         query_codex: mock.Mock,
@@ -326,9 +326,9 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual(outcome.claude, refreshed_claude)
         publish.assert_called_once_with("Cx 7%!! · 2h | Cl 91% · 5h", herdr_bin="herdr")
 
-    @mock.patch("herdr_model_quota.publish_to_focused_workspace")
-    @mock.patch("herdr_model_quota.query_claude")
-    @mock.patch("herdr_model_quota.query_codex")
+    @mock.patch("herdr_model_lanes.publish_to_focused_workspace")
+    @mock.patch("herdr_model_lanes.query_claude")
+    @mock.patch("herdr_model_lanes.query_codex")
     def test_failed_refresh_keeps_each_last_value_stale(
         self,
         query_codex: mock.Mock,
@@ -360,7 +360,7 @@ class RefreshTests(unittest.TestCase):
 
 
 class BackoffTests(unittest.TestCase):
-    @mock.patch("herdr_model_quota.query_claude")
+    @mock.patch("herdr_model_lanes.query_claude")
     def test_failed_claude_attempt_is_backed_off_without_a_cache(
         self, query_claude: mock.Mock
     ) -> None:
@@ -383,8 +383,8 @@ class ManifestTests(unittest.TestCase):
     def test_manifest_uses_model_quota_identity_and_local_commands(self) -> None:
         manifest = tomllib.loads(Path("herdr-plugin.toml").read_text())
 
-        self.assertEqual(manifest["id"], "terry.herdr-model-quota")
-        self.assertEqual(manifest["version"], "2.3.0")
+        self.assertEqual(manifest["id"], "terry.herdr-model-lanes")
+        self.assertEqual(manifest["version"], "3.0.0")
         self.assertEqual(manifest["min_herdr_version"], "0.8.0")
         self.assertEqual(manifest["platforms"], ["macos", "linux"])
         self.assertNotIn("build", manifest)
@@ -395,7 +395,7 @@ class ManifestTests(unittest.TestCase):
         )
         self.assertEqual(
             route_high["command"],
-            ["python3", "herdr_model_quota.py", "route", "high", "--launch"],
+            ["python3", "herdr_model_lanes.py", "route", "high", "--launch"],
         )
         self.assertTrue(
             all("on" in event and "event" not in event for event in manifest["events"])
@@ -404,7 +404,7 @@ class ManifestTests(unittest.TestCase):
         for section in ("startup", "actions", "events"):
             commands.extend(item["command"] for item in manifest.get(section, []))
         for command in commands:
-            self.assertEqual(command[0:2], ["python3", "herdr_model_quota.py"])
+            self.assertEqual(command[0:2], ["python3", "herdr_model_lanes.py"])
 
 
 if __name__ == "__main__":

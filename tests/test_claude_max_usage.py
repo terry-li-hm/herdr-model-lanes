@@ -218,7 +218,7 @@ class PublicSurfaceTests(unittest.TestCase):
         self.assertTrue(Path(".github/workflows/test.yml").is_file())
 
     def test_main_plugin_keeps_credential_operations_in_helper(self) -> None:
-        plugin = Path("herdr_model_quota.py").read_text()
+        plugin = Path("herdr_model_lanes.py").read_text()
         helper_source = Path("claude_max_usage.py").read_text()
 
         self.assertNotIn("find-generic-password", plugin)

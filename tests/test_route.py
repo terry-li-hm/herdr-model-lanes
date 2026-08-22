@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import herdr_model_quota as quota
+import herdr_model_lanes as quota
 
 NOW = 1_700_000_000
 WEEK = 604_800
@@ -275,7 +275,7 @@ class GrokWindowTests(unittest.TestCase):
 
 
 class GrokRefreshTests(unittest.TestCase):
-    @mock.patch("herdr_model_quota.query_grok")
+    @mock.patch("herdr_model_lanes.query_grok")
     def test_grok_refreshes_on_thirty_minute_cadence(
         self, query_grok: mock.Mock
     ) -> None:
@@ -292,9 +292,9 @@ class GrokRefreshTests(unittest.TestCase):
         self.assertEqual(outside[0].weekly.remaining_percent, 58)
         query_grok.assert_called_once()
 
-    @mock.patch("herdr_model_quota.publish_to_focused_workspace")
-    @mock.patch("herdr_model_quota.query_codex")
-    @mock.patch("herdr_model_quota.query_grok")
+    @mock.patch("herdr_model_lanes.publish_to_focused_workspace")
+    @mock.patch("herdr_model_lanes.query_codex")
+    @mock.patch("herdr_model_lanes.query_grok")
     def test_refresh_includes_gk_segment_only_when_enabled(
         self, query_grok: mock.Mock, query_codex: mock.Mock, publish: mock.Mock
     ) -> None:
@@ -311,8 +311,8 @@ class GrokRefreshTests(unittest.TestCase):
 
 
 class RouteCommandTests(unittest.TestCase):
-    @mock.patch("herdr_model_quota._run_herdr_command")
-    @mock.patch("herdr_model_quota.refresh")
+    @mock.patch("herdr_model_lanes._run_herdr_command")
+    @mock.patch("herdr_model_lanes.refresh")
     def test_explain_prints_lanes_and_pick_and_shows_notification(
         self, refresh: mock.Mock, herdr_run: mock.Mock
     ) -> None:
@@ -340,8 +340,8 @@ class RouteCommandTests(unittest.TestCase):
             ["notification", "show", "Route: medium", "--body", mock.ANY],
         )
 
-    @mock.patch("herdr_model_quota._run_herdr_command")
-    @mock.patch("herdr_model_quota.refresh")
+    @mock.patch("herdr_model_lanes._run_herdr_command")
+    @mock.patch("herdr_model_lanes.refresh")
     def test_explain_scales_back_when_herdr_notification_fails(
         self, refresh: mock.Mock, herdr_run: mock.Mock
     ) -> None:
@@ -361,8 +361,8 @@ class RouteCommandTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("notification skipped", stderr.getvalue())
 
-    @mock.patch("herdr_model_quota._run_herdr_command")
-    @mock.patch("herdr_model_quota.refresh")
+    @mock.patch("herdr_model_lanes._run_herdr_command")
+    @mock.patch("herdr_model_lanes.refresh")
     def test_argv_prints_quoted_command_without_notification(
         self, refresh: mock.Mock, herdr_run: mock.Mock
     ) -> None:
@@ -396,8 +396,8 @@ class RouteCommandTests(unittest.TestCase):
         self.assertEqual(quota.lane_command(cursor), ["cursor-agent"])
         self.assertEqual(quota.lane_command(unknown), ["zzz", "--flag", "a b"])
 
-    @mock.patch("herdr_model_quota._run_herdr_command")
-    @mock.patch("herdr_model_quota.refresh")
+    @mock.patch("herdr_model_lanes._run_herdr_command")
+    @mock.patch("herdr_model_lanes.refresh")
     def test_launch_creates_tab_prints_rationale_and_starts_agent(
         self, refresh: mock.Mock, herdr_run: mock.Mock
     ) -> None:

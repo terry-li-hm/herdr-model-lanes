@@ -32,16 +32,16 @@ EOF
 fi
 plugin_dir=$(CDPATH= cd -- "$(dirname -- "$script")/.." && pwd)
 
-: "${HERDR_PLUGIN_STATE_DIR:=${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/terry.herdr-model-quota}"
+: "${HERDR_PLUGIN_STATE_DIR:=${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/terry.herdr-model-lanes}"
 export HERDR_PLUGIN_STATE_DIR
 
 if [ -n "$explain" ]; then
-    exec python3 "$plugin_dir/herdr_model_quota.py" route "$class" $explain $classified
+    exec python3 "$plugin_dir/herdr_model_lanes.py" route "$class" $explain $classified
 fi
 
 rationale=$(mktemp "${TMPDIR:-/tmp}/ag.XXXXXX")
 trap 'rm -f "$rationale"' EXIT
-argv=$(python3 "$plugin_dir/herdr_model_quota.py" route "$class" --argv $classified 2>"$rationale") || true
+argv=$(python3 "$plugin_dir/herdr_model_lanes.py" route "$class" --argv $classified 2>"$rationale") || true
 cat "$rationale" >&2
 if [ -z "$argv" ]; then
     echo "ag: no argv produced for class $class" >&2

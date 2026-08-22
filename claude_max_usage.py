@@ -22,7 +22,7 @@ KEYCHAIN_SERVICE = "Claude Code-credentials"
 KEYCHAIN_TIMEOUT_SECS = 5
 FETCH_TIMEOUT_SECS = 5
 MAX_RESPONSE_BYTES = 1 << 20
-USER_AGENT = f"herdr-model-quota/{PLUGIN_VERSION} (Claude Max usage helper)"
+USER_AGENT = f"herdr-model-lanes/{PLUGIN_VERSION} (Claude Max usage helper)"
 NORMALIZED_WINDOWS = ("five_hour", "seven_day", "seven_day_sonnet")
 
 

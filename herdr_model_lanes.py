@@ -37,7 +37,7 @@ CLAUDE_HELPER_TIMEOUT_SECS = 12
 GROK_REFRESH_INTERVAL_SECS = 1_800
 GROK_HELPER_TIMEOUT_SECS = 12
 LAUNCH_TIMEOUT_SECS = 30
-PLUGIN_ID = "terry.herdr-model-quota"
+PLUGIN_ID = "terry.herdr-model-lanes"
 TOKEN_NAME = "model_quota"
 TOKEN_TTL_MS = 2 * 60 * 60 * 1000
 CODEX_CACHE_FILENAME = "codex-quota.json"
@@ -537,7 +537,7 @@ def query_codex(now: int | None = None, codex_bin: str = "codex") -> CodexUsage:
             _codex_request(
                 1,
                 "initialize",
-                {"clientInfo": {"name": "herdr-model-quota", "version": "2"}},
+                {"clientInfo": {"name": "herdr-model-lanes", "version": "2"}},
             )
         )
         read_result(1)
