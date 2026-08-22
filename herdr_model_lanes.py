@@ -41,6 +41,7 @@ GROK_HELPER_TIMEOUT_SECS = 12
 GLM_WINDOW_SECONDS = 5 * 3_600
 GLM_REFRESH_INTERVAL_SECS = 300
 GLM_HELPER_TIMEOUT_SECS = 12
+MAX_HELPER_STDOUT_BYTES = 1 << 20
 LAUNCH_TIMEOUT_SECS = 30
 PLUGIN_ID = "terry.herdr-model-lanes"
 TOKEN_NAME = "model_quota"
@@ -653,6 +654,34 @@ def default_claude_command() -> list[str]:
     return [sys.executable, str(Path(__file__).with_name("claude_max_usage.py"))]
 
 
+def _load_helper_payload(command: list[str], timeout: int, label: str) -> dict:
+    """Run a usage helper and parse its stdout; never forward helper text."""
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError) as exc:
+        raise QuotaError(
+            f"cannot obtain {label} usage from helper: {type(exc).__name__}"
+        ) from exc
+    if completed.returncode != 0:
+        raise QuotaError(f"{label} helper failed with rc={completed.returncode}")
+    stdout = completed.stdout or ""
+    if len(stdout) > MAX_HELPER_STDOUT_BYTES:
+        raise QuotaError(f"{label} helper returned too much output")
+    try:
+        payload = json.loads(stdout)
+    except (ValueError, RecursionError) as exc:
+        raise QuotaError(f"{label} helper returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise QuotaError(f"{label} helper returned invalid JSON")
+    return payload
+
+
 def query_claude(
     now: int | None = None, claude_command: list[str] | None = None
 ) -> ClaudeUsage:
@@ -660,24 +689,7 @@ def query_claude(
     if now is None:
         now = int(time.time())
     command = claude_command if claude_command is not None else default_claude_command()
-    try:
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=CLAUDE_HELPER_TIMEOUT_SECS,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise QuotaError(
-            f"cannot obtain Claude usage from helper: {type(exc).__name__}"
-        ) from exc
-    if completed.returncode != 0:
-        raise QuotaError(f"Claude helper failed with rc={completed.returncode}")
-    try:
-        payload = json.loads(completed.stdout)
-    except ValueError as exc:
-        raise QuotaError("Claude helper returned invalid JSON") from exc
+    payload = _load_helper_payload(command, CLAUDE_HELPER_TIMEOUT_SECS, "Claude")
     usage = parse_claude_usage(payload, fetched_at=now)
     if now - usage.fetched_at > CACHE_TTL_SECS:
         raise QuotaError(
@@ -703,24 +715,7 @@ def query_grok(
     if now is None:
         now = int(time.time())
     command = grok_command if grok_command is not None else default_grok_command()
-    try:
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=GROK_HELPER_TIMEOUT_SECS,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise QuotaError(
-            f"cannot obtain Grok usage from helper: {type(exc).__name__}"
-        ) from exc
-    if completed.returncode != 0:
-        raise QuotaError(f"Grok helper failed with rc={completed.returncode}")
-    try:
-        payload = json.loads(completed.stdout)
-    except ValueError as exc:
-        raise QuotaError("Grok helper returned invalid JSON") from exc
+    payload = _load_helper_payload(command, GROK_HELPER_TIMEOUT_SECS, "Grok")
     return parse_grok_usage(payload, fetched_at=now)
 
 
@@ -734,24 +729,7 @@ def query_glm(now: int | None = None, glm_command: list[str] | None = None) -> G
     if now is None:
         now = int(time.time())
     command = glm_command if glm_command is not None else default_glm_command()
-    try:
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=GLM_HELPER_TIMEOUT_SECS,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise QuotaError(
-            f"cannot obtain GLM usage from helper: {type(exc).__name__}"
-        ) from exc
-    if completed.returncode != 0:
-        raise QuotaError(f"GLM helper failed with rc={completed.returncode}")
-    try:
-        payload = json.loads(completed.stdout)
-    except ValueError as exc:
-        raise QuotaError("GLM helper returned invalid JSON") from exc
+    payload = _load_helper_payload(command, GLM_HELPER_TIMEOUT_SECS, "GLM")
     return parse_glm_usage(payload, fetched_at=now)
 
 

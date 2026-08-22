@@ -94,4 +94,7 @@ if [ -n "${HERDR_PANE_ID:-}" ] && command -v herdr >/dev/null 2>&1; then
     herdr notification show "ag $class -> $lane" --body "$pick" >/dev/null 2>&1 || true
 fi
 printf 'ag: starting %s\n' "$lane" >&2
+# exec replaces this shell, so the EXIT trap would not run; drop the temp file first.
+rm -f "$rationale"
+trap - EXIT
 eval exec "$argv"

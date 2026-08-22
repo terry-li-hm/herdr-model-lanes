@@ -15,6 +15,7 @@ import sys
 import time
 import urllib.request
 from collections.abc import Callable
+from datetime import datetime
 
 PLUGIN_VERSION = "2.1.0"
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
@@ -22,6 +23,7 @@ KEYCHAIN_SERVICE = "Claude Code-credentials"
 KEYCHAIN_TIMEOUT_SECS = 5
 FETCH_TIMEOUT_SECS = 5
 MAX_RESPONSE_BYTES = 1 << 20
+MAX_TIMESTAMP_CHARS = 48
 USER_AGENT = f"herdr-model-lanes/{PLUGIN_VERSION} (Claude Max usage helper)"
 NORMALIZED_WINDOWS = ("five_hour", "seven_day", "seven_day_sonnet")
 
@@ -81,14 +83,35 @@ def read_oauth_token(
     return parse_keychain_payload(completed.stdout, now_ms)
 
 
+def _normalize_timestamp(value: object, name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value or len(value) > MAX_TIMESTAMP_CHARS:
+        raise UsageHelperError(f"usage endpoint returned an invalid {name} window")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise UsageHelperError(
+            f"usage endpoint returned an invalid {name} window"
+        ) from exc
+    if parsed.tzinfo is None:
+        raise UsageHelperError(f"usage endpoint returned an invalid {name} window")
+    return value
+
+
 def _normalize_window(value: object, name: str) -> dict | None:
     if value is None:
         return None
     if not isinstance(value, dict):
         raise UsageHelperError(f"usage endpoint returned an invalid {name} window")
+    utilization = value.get("utilization")
+    if not isinstance(utilization, (int, float)) or isinstance(utilization, bool):
+        raise UsageHelperError(f"usage endpoint returned an invalid {name} window")
+    if not 0 <= utilization <= 100:
+        raise UsageHelperError(f"usage endpoint returned an invalid {name} window")
     return {
-        "utilization": value.get("utilization"),
-        "resets_at": value.get("resets_at"),
+        "utilization": utilization,
+        "resets_at": _normalize_timestamp(value.get("resets_at"), name),
     }
 
 
@@ -115,14 +138,16 @@ def fetch_usage(
             status = getattr(response, "status", 200) or 200
             if status != 200:
                 raise UsageHelperError(f"usage endpoint returned HTTP {status}")
-            body = response.read(MAX_RESPONSE_BYTES)
+            body = response.read(MAX_RESPONSE_BYTES + 1)
     except UsageHelperError:
         raise
     except Exception as exc:
         raise UsageHelperError(f"usage request failed: {type(exc).__name__}") from exc
+    if len(body) > MAX_RESPONSE_BYTES:
+        raise UsageHelperError("usage endpoint response exceeded 1 MiB")
     try:
         document = json.loads(body)
-    except ValueError as exc:
+    except (ValueError, RecursionError) as exc:
         raise UsageHelperError("usage endpoint returned invalid JSON") from exc
     if not isinstance(document, dict):
         raise UsageHelperError("usage endpoint returned a non-object payload")
