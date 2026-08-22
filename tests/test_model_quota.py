@@ -384,10 +384,19 @@ class ManifestTests(unittest.TestCase):
         manifest = tomllib.loads(Path("herdr-plugin.toml").read_text())
 
         self.assertEqual(manifest["id"], "terry.herdr-model-quota")
-        self.assertEqual(manifest["version"], "2.2.0")
+        self.assertEqual(manifest["version"], "2.3.0")
         self.assertEqual(manifest["min_herdr_version"], "0.8.0")
         self.assertEqual(manifest["platforms"], ["macos", "linux"])
         self.assertNotIn("build", manifest)
+        action_ids = [item["id"] for item in manifest["actions"]]
+        self.assertIn("route-high", action_ids)
+        route_high = next(
+            item for item in manifest["actions"] if item["id"] == "route-high"
+        )
+        self.assertEqual(
+            route_high["command"],
+            ["python3", "herdr_model_quota.py", "route", "high", "--launch"],
+        )
         self.assertTrue(
             all("on" in event and "event" not in event for event in manifest["events"])
         )

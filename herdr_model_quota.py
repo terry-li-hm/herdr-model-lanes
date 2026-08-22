@@ -45,6 +45,16 @@ CLAUDE_CACHE_FILENAME = "claude-quota.json"
 GROK_CACHE_FILENAME = "grok-quota.json"
 CLASSES_FILENAME = "classes.toml"
 ROUTE_WINDOW_SECONDS = 604_800
+SURPLUS_HEALTH = 2.0
+SURPLUS_RESET_WINDOW_SECS = 48 * 3_600
+LANE_EXECUTABLES = {
+    "claude": "claude",
+    "pi": "pi",
+    "grok": "grok",
+    "cursor": "cursor-agent",
+    "codex": "codex",
+    "gemini": "gemini",
+}
 UNSET = object()
 NON_SUBSCRIPTION_PLAN_MARKERS = ("api", "payg", "usage", "trial")
 
@@ -932,31 +942,45 @@ def select_lane(
             f"{lane.name}: {remaining}% left, resets in {eta}, health {health:.2f}"
         )
 
-    eligible = [
-        (index, lane)
+    candidates = [
+        (index, lane, quotas[lane.quota])
         for index, lane in enumerate(lanes)
-        if (health := _lane_health(quotas.get(lane.quota), now)) is not None
+        if (window := quotas.get(lane.quota)) is not None
+        and (health := _lane_health(window, now)) is not None
         and health >= 1
-        and max(0, min(100, quotas[lane.quota].remaining_percent)) >= 20
+        and max(0, min(100, window.remaining_percent)) >= 20
     ]
-    if eligible:
-        pick = eligible[0][1]
-        reason = "first lane in order with health >= 1 and remaining >= 20"
+    surplus = [
+        (index, lane, window)
+        for index, lane, window in candidates
+        if _lane_health(window, now) >= SURPLUS_HEALTH
+        and 0 <= window.resets_at - now <= SURPLUS_RESET_WINDOW_SECS
+    ]
+    if surplus:
+        pick = min(
+            surplus,
+            key=lambda item: (-_lane_health(item[2], now), item[0]),
+        )[1]
+        reason = "surplus before reset"
+    elif candidates:
+        pick = candidates[0][1]
+        reason = "first healthy lane in order"
     else:
         available = [
-            (index, lane)
+            (index, lane, quotas[lane.quota])
             for index, lane in enumerate(lanes)
-            if _lane_health(quotas.get(lane.quota), now) is not None
+            if (window := quotas.get(lane.quota)) is not None
+            and _lane_health(window, now) is not None
         ]
         if available:
             pick = min(
                 available,
                 key=lambda item: (
-                    -_lane_health(quotas[item[1].quota], now),
+                    -_lane_health(item[2], now),
                     item[0],
                 ),
             )[1]
-            reason = "highest health; no lane reached health >= 1 with remaining >= 20"
+            reason = "least unhealthy lane"
         else:
             pick = lanes[0]
             reason = "no lane has quota data; first lane by order"
@@ -1050,21 +1074,50 @@ def _launch(herdr_bin: str, class_spec: ClassSpec, lane: LaneSpec, line: str) ->
     )
 
 
+def _lane_executable(kind: str) -> str:
+    """Map a lane kind to the binary `ag` will exec."""
+    return LANE_EXECUTABLES.get(kind, kind)
+
+
+def lane_command(lane: LaneSpec) -> list[str]:
+    """The shell command a lane runs, executable first."""
+    return [_lane_executable(lane.kind), *lane.args]
+
+
+def _notify_route(herdr_bin: str, class_name: str, pick_line: str) -> None:
+    """Show the pick as a Herdr notification; non-fatal without Herdr."""
+    try:
+        _run_herdr_command(
+            herdr_bin,
+            [
+                "notification",
+                "show",
+                f"Route: {class_name}",
+                "--body",
+                pick_line,
+            ],
+            "herdr notification show",
+        )
+    except QuotaError as exc:
+        print(f"notification skipped: {exc}", file=sys.stderr)
+
+
 def route_command(
     argv: list[str],
     herdr_bin: str = "herdr",
     now: int | None = None,
 ) -> int:
-    """``route <class> [--explain] [--launch] [--classified]``."""
+    """``route <class> [--explain] [--launch] [--argv] [--classified]``."""
     if not argv:
         print(
-            "usage: route <class> [--explain] [--launch] [--classified]",
+            "usage: route <class> [--explain] [--launch] [--argv] [--classified]",
             file=sys.stderr,
         )
         return 2
     class_name = argv[0]
-    explain = "--explain" in argv or "--launch" not in argv
     launch = "--launch" in argv
+    argv_mode = "--argv" in argv
+    explain = "--explain" in argv or not (launch or argv_mode)
     classified = "--classified" in argv
     if now is None:
         now = int(time.time())
@@ -1081,22 +1134,15 @@ def route_command(
         "grok": outcome.grok.weekly if outcome.grok else None,
     }
     lane, rationale = select_lane(class_spec, quotas, now, classified=classified)
+    stream = sys.stderr if argv_mode else sys.stdout
     for line in rationale:
-        print(line)
+        print(line, file=stream)
     pick_line = rationale[-1]
 
-    if explain:
-        _run_herdr_command(
-            herdr_bin,
-            [
-                "notification",
-                "show",
-                f"Route: {class_name}",
-                "--body",
-                pick_line,
-            ],
-            "herdr notification show",
-        )
+    if argv_mode:
+        print(shlex.join(lane_command(lane)), flush=True)
+    if explain and not argv_mode:
+        _notify_route(herdr_bin, class_name, pick_line)
     if launch:
         _launch(herdr_bin, class_spec, lane, pick_line)
     return 0

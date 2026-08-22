@@ -1,6 +1,6 @@
 id = "terry.herdr-model-quota"
 name = "Model Quota"
-version = "2.2.0"
+version = "2.3.0"
 min_herdr_version = "0.8.0"
 description = "Show Codex, Claude Max, and Grok subscription capacity in the focused workspace row, and route new agent tabs to a model class lane by remaining quota. Claude support is experimental, macOS-only, and reads an undocumented Anthropic endpoint."
 platforms = ["macos", "linux"]
@@ -23,6 +23,12 @@ id = "route-medium"
 title = "New agent: medium (Sol or Grok by quota)"
 contexts = ["workspace", "tab", "pane"]
 command = ["python3", "herdr_model_quota.py", "route", "medium", "--launch"]
+
+[[actions]]
+id = "route-high"
+title = "New agent: high (Fable or Sol by quota)"
+contexts = ["workspace", "tab", "pane"]
+command = ["python3", "herdr_model_quota.py", "route", "high", "--launch"]
 
 [[actions]]
 id = "route-explain"

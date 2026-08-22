@@ -1,0 +1,47 @@
+#!/bin/sh
+# ag: route a model class and exec the chosen lane in this shell.
+# Usage: ag [class] [--explain] [--classified]; default class medium.
+
+set -eu
+
+class="medium"
+explain=""
+classified=""
+for arg in "$@"; do
+    case "$arg" in
+        --explain) explain="--explain" ;;
+        --classified) classified="--classified" ;;
+        --*) echo "ag: unknown option: $arg" >&2; exit 2 ;;
+        *) class="$arg" ;;
+    esac
+done
+
+# Resolve the plugin directory from this script's own resolved path.
+script="$0"
+if resolved=$(readlink -f "$script" 2>/dev/null) && [ -n "$resolved" ]; then
+    script="$resolved"
+else
+    # macOS fallback when readlink -f is unavailable.
+    script=$(python3 - "$script" <<'EOF'
+import os
+import sys
+
+print(os.path.realpath(sys.argv[1]))
+EOF
+    )
+fi
+plugin_dir=$(CDPATH= cd -- "$(dirname -- "$script")/.." && pwd)
+
+: "${HERDR_PLUGIN_STATE_DIR:=${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/terry.herdr-model-quota}"
+export HERDR_PLUGIN_STATE_DIR
+
+if [ -n "$explain" ]; then
+    exec python3 "$plugin_dir/herdr_model_quota.py" route "$class" $explain $classified
+fi
+
+argv=$(python3 "$plugin_dir/herdr_model_quota.py" route "$class" --argv $classified)
+if [ -z "$argv" ]; then
+    echo "ag: no argv produced for class $class" >&2
+    exit 1
+fi
+eval exec "$argv"

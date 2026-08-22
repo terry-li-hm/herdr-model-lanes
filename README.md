@@ -90,15 +90,50 @@ rows = [
 
 `route <class>` picks a lane for a new agent tab from the normalized caches
 (refreshing them first if stale). Lanes are defined in `classes.toml` beside
-the manifest; `medium` is Sol on the Codex subscription with Grok 4.6 on
-SuperGrok as the fallback. For each lane it computes
-`health = (remaining/100) / ((resets_at - now) / window_seconds)` and picks
-the first lane in order with `health >= 1` and `remaining >= 20`; otherwise
-the lane with the highest health; a lane whose quota is `n/a` ranks last;
-ties keep order. `--explain` prints one line per lane plus the pick and shows
-it as a Herdr notification; `--launch` additionally creates the tab, echoes
-the rationale line into the new pane, and starts the agent. Routing happens
-once at launch; nothing re-routes a running pane.
+the manifest. Two classes exist:
+
+- **`high`** — Fable 5 (`claude --model claude-fable-5`, quota claude), then
+  Sol 5.6 (`pi` on `openai-codex`/`gpt-5.6-sol`, quota codex). Fable keeps
+  the Claude Max window as its headroom.
+- **`medium`** — Sol 5.6, Grok 4.6 (grok), Opus 5 (`claude --model
+  claude-opus-5`, quota claude), GLM-5.3 (`pi` on `bigmodel-coding`, quota
+  glm, not classified-safe), Cursor Agent (cursor, quota cursor). Opus sits
+  after Sol and Grok because Fable and Opus share the one Claude Max window;
+  medium spends the independent pools first so high keeps its headroom.
+
+For each lane the router computes
+`health = (remaining/100) / ((resets_at - now) / window_seconds)` and picks:
+
+1. among candidates (`health >= 1`, `remaining >= 20`), the highest-health
+   lane whose reset is within `SURPLUS_RESET_WINDOW_SECS` (48h) and whose
+   health is at least `SURPLUS_HEALTH` (2.0) — spend headroom that expires
+   with the window ("surplus before reset");
+2. otherwise the first candidate in class order ("first healthy lane in
+   order");
+3. otherwise the lane with the highest health ("least unhealthy lane").
+
+A lane whose quota has no reader (`glm`, `cursor`) is `n/a` and ranks last,
+so Cursor is the last resort and never chosen while any other lane is
+healthy. `--explain` prints one line per lane plus the pick and shows it as
+a Herdr notification (non-fatal without Herdr); `--launch` additionally
+creates the tab, echoes the rationale line into the new pane, and starts
+the agent; `--argv` prints the chosen lane's shell-quoted command on stdout
+with the rationale on stderr and needs no Herdr environment. Routing
+happens once at launch; nothing re-routes a running pane.
+
+### `ag`
+
+`bin/ag` wraps `route --argv` for the current shell: `ag [class]
+[--explain] [--classified]` (default class `medium`) prints the rationale
+and `exec`s the chosen lane in the current pane — no new tab, own cwd,
+Herdr detects the agent normally. It sets
+`HERDR_PLUGIN_STATE_DIR` to
+`${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/terry.herdr-model-quota`
+when unset. Install it as a symlink so updates are picked up:
+
+```bash
+ln -s "$PWD/bin/ag" ~/.local/bin/ag
+```
 
 Kill rule: if Herdr's plugin action log shows no `route` invocation in the
 two weeks after landing, delete the route action.
@@ -137,6 +172,7 @@ credentials; deleting that directory removes every trace.
   numbers are best-effort and experimental.
 - Claude usage requires macOS because the token lives in the macOS Keychain.
 - Codex, Claude, and Grok are the only supported providers, and only
-  subscription (non-API-key) plans are reported.
+  subscription (non-API-key) plans are reported. GLM and Cursor lanes have
+  no quota reader yet, so they route as `n/a` until readers land.
 
 See `SECURITY.md` for the trust model and reporting channels.

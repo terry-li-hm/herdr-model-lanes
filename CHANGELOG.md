@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.3.0 - 2026-08-22
+
+### Added
+
+- `high` model class (Fable 5 on Claude Max, Sol 5.6 on Codex) and a
+  five-lane `medium` class (Sol, Grok 4.6, Opus 5, GLM-5.3, Cursor Agent);
+  Opus sits after Sol and Grok so medium spends independent pools before
+  the Claude Max window that high reserves. Lanes with no quota reader
+  (`glm`, `cursor`) are `n/a` and rank last.
+- Surplus rule in `select_lane`: among healthy candidates, a lane with
+  `health >= SURPLUS_HEALTH` (2.0) whose reset falls within
+  `SURPLUS_RESET_WINDOW_SECS` (48h) is picked first — spend headroom that
+  expires with the window.
+- `route <class> --argv`: prints the chosen lane's shell-quoted command on
+  stdout with the rationale on stderr, no Herdr environment required; the
+  Herdr notification in the `--explain` path is now non-fatal.
+- `bin/ag` launcher: `ag [class] [--explain] [--classified]` execs the
+  chosen lane in the current pane; install with
+  `ln -s "$PWD/bin/ag" ~/.local/bin/ag`.
+- `route-high` plugin action.
+
 ## 2.2.0 - 2026-08-22
 
 ### Added

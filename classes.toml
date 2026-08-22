@@ -1,5 +1,22 @@
+[classes.high]
+description = "Fable 5 on Claude Max, else Sol 5.6 on the Codex subscription"
+
+[[classes.high.lanes]]
+name = "fable"
+kind = "claude"
+args = ["--model", "claude-fable-5"]
+quota = "claude"
+classified_ok = true
+
+[[classes.high.lanes]]
+name = "sol"
+kind = "pi"
+args = ["--provider", "openai-codex", "--model", "gpt-5.6-sol"]
+quota = "codex"
+classified_ok = true
+
 [classes.medium]
-description = "Sol on the Codex subscription, else Grok 4.6 on SuperGrok"
+description = "Sol on Codex, Grok 4.6 on SuperGrok, Opus 5 on Claude Max, GLM-5.3, Cursor Agent"
 
 [[classes.medium.lanes]]
 name = "sol"
@@ -13,4 +30,25 @@ name = "grok"
 kind = "grok"
 args = []
 quota = "grok"
+classified_ok = true
+
+[[classes.medium.lanes]]
+name = "opus"
+kind = "claude"
+args = ["--model", "claude-opus-5"]
+quota = "claude"
+classified_ok = true
+
+[[classes.medium.lanes]]
+name = "glm"
+kind = "pi"
+args = ["--provider", "bigmodel-coding", "--model", "glm-5.3"]
+quota = "glm"
+classified_ok = false
+
+[[classes.medium.lanes]]
+name = "cursor"
+kind = "cursor"
+args = []
+quota = "cursor"
 classified_ok = true

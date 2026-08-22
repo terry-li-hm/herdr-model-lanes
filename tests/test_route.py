@@ -1,3 +1,4 @@
+import io
 import json
 import tempfile
 import unittest
@@ -24,7 +25,10 @@ class ClassSpecTests(unittest.TestCase):
         spec = medium_spec()
 
         self.assertEqual(spec.name, "medium")
-        self.assertEqual([lane.name for lane in spec.lanes], ["sol", "grok"])
+        self.assertEqual(
+            [lane.name for lane in spec.lanes],
+            ["sol", "grok", "opus", "glm", "cursor"],
+        )
         sol = spec.lanes[0]
         self.assertEqual(sol.kind, "pi")
         self.assertEqual(
@@ -33,6 +37,33 @@ class ClassSpecTests(unittest.TestCase):
         self.assertEqual(sol.quota, "codex")
         self.assertTrue(sol.classified_ok)
         self.assertEqual(spec.lanes[1].quota, "grok")
+        opus = spec.lanes[2]
+        self.assertEqual(opus.kind, "claude")
+        self.assertEqual(opus.args, ("--model", "claude-opus-5"))
+        self.assertEqual(opus.quota, "claude")
+        glm = spec.lanes[3]
+        self.assertEqual(
+            glm.args, ("--provider", "bigmodel-coding", "--model", "glm-5.3")
+        )
+        self.assertEqual(glm.quota, "glm")
+        self.assertFalse(glm.classified_ok)
+        cursor = spec.lanes[4]
+        self.assertEqual(cursor.kind, "cursor")
+        self.assertEqual(cursor.args, ())
+        self.assertEqual(cursor.quota, "cursor")
+        self.assertTrue(cursor.classified_ok)
+
+    def test_loads_high_class_from_classes_toml(self) -> None:
+        spec = quota.load_class_spec("high")
+
+        self.assertEqual([lane.name for lane in spec.lanes], ["fable", "sol"])
+        fable = spec.lanes[0]
+        self.assertEqual(fable.kind, "claude")
+        self.assertEqual(fable.args, ("--model", "claude-fable-5"))
+        self.assertEqual(fable.quota, "claude")
+        self.assertTrue(fable.classified_ok)
+        self.assertEqual(spec.lanes[1].name, "sol")
+        self.assertEqual(spec.lanes[1].quota, "codex")
 
     def test_unknown_class_is_rejected(self) -> None:
         with self.assertRaisesRegex(quota.QuotaError, "unknown model class"):
@@ -101,6 +132,94 @@ class SelectionTests(unittest.TestCase):
         )
 
         self.assertEqual(lane.name, "b")
+
+    def test_surplus_branch_picks_lane_resetting_within_48h(self) -> None:
+        spec = medium_spec()
+        # grok: 60% left with one day of the window -> health 4.2 and an
+        # imminent reset, while sol is merely healthy and first in order.
+        quotas = {"codex": window(90, WEEK), "grok": window(60, 86_400)}
+
+        lane, lines = quota.select_lane(spec, quotas, NOW)
+
+        self.assertEqual(lane.name, "grok")
+        self.assertIn("surplus before reset", lines[-1])
+
+    def test_highest_health_surplus_lane_wins(self) -> None:
+        spec = medium_spec()
+        # grok health 4.2 beats opus health 2.1; both reset within 48h.
+        quotas = {
+            "codex": window(100, WEEK),
+            "grok": window(60, 86_400),
+            "claude": window(30, 86_400),
+        }
+
+        lane, _ = quota.select_lane(spec, quotas, NOW)
+
+        self.assertEqual(lane.name, "grok")
+
+    def test_surplus_ignored_when_reset_is_beyond_48h(self) -> None:
+        spec = medium_spec()
+        # grok: 80% left, 60h to reset -> health 2.24 but no imminent reset.
+        quotas = {"codex": window(100, WEEK), "grok": window(80, 60 * 3_600)}
+
+        lane, lines = quota.select_lane(spec, quotas, NOW)
+
+        self.assertEqual(lane.name, "sol")
+        self.assertIn("first healthy lane in order", lines[-1])
+
+    def test_surplus_ignored_when_health_below_two(self) -> None:
+        spec = medium_spec()
+        # grok: 50% left, 48h to reset -> health 1.75, resets at the edge.
+        quotas = {"codex": window(100, WEEK), "grok": window(50, 48 * 3_600)}
+
+        lane, _ = quota.select_lane(spec, quotas, NOW)
+
+        self.assertEqual(lane.name, "sol")
+
+    def test_na_only_class_picks_first_lane_by_order(self) -> None:
+        spec = medium_spec()
+
+        lane, lines = quota.select_lane(spec, {"glm": None, "cursor": None}, NOW)
+
+        self.assertEqual(lane.name, "sol")
+        self.assertIn("no lane has quota data", lines[-1])
+
+    def test_classified_drops_glm_lane(self) -> None:
+        spec = medium_spec()
+        quotas = {
+            "codex": window(5, WEEK),
+            "grok": window(5, WEEK),
+            "claude": window(5, WEEK),
+            "glm": window(100, 86_400),
+            "cursor": window(100, WEEK),
+        }
+
+        lane, lines = quota.select_lane(spec, quotas, NOW, classified=True)
+
+        self.assertEqual(lane.name, "cursor")
+        self.assertFalse(any("glm:" in line for line in lines))
+
+    def test_high_class_picks_fable_when_claude_healthy(self) -> None:
+        spec = quota.load_class_spec("high")
+        quotas = {
+            "claude": window(100, WEEK),
+            "codex": window(90, WEEK),
+        }
+
+        lane, _ = quota.select_lane(spec, quotas, NOW)
+
+        self.assertEqual(lane.name, "fable")
+
+    def test_high_class_picks_sol_when_claude_unhealthy(self) -> None:
+        spec = quota.load_class_spec("high")
+        quotas = {
+            "claude": window(5, WEEK),
+            "codex": window(100, WEEK),
+        }
+
+        lane, _ = quota.select_lane(spec, quotas, NOW)
+
+        self.assertEqual(lane.name, "sol")
 
 
 class GrokWindowTests(unittest.TestCase):
@@ -220,6 +339,62 @@ class RouteCommandTests(unittest.TestCase):
             notification,
             ["notification", "show", "Route: medium", "--body", mock.ANY],
         )
+
+    @mock.patch("herdr_model_quota._run_herdr_command")
+    @mock.patch("herdr_model_quota.refresh")
+    def test_explain_scales_back_when_herdr_notification_fails(
+        self, refresh: mock.Mock, herdr_run: mock.Mock
+    ) -> None:
+        refresh.return_value = quota.RefreshOutcome(
+            codex=None,
+            claude=None,
+            codex_stale=False,
+            claude_stale=False,
+            grok=None,
+            grok_stale=False,
+        )
+        herdr_run.side_effect = quota.QuotaError("herdr missing")
+
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            rc = quota.route_command(["medium", "--explain"])
+
+        self.assertEqual(rc, 0)
+        self.assertIn("notification skipped", stderr.getvalue())
+
+    @mock.patch("herdr_model_quota._run_herdr_command")
+    @mock.patch("herdr_model_quota.refresh")
+    def test_argv_prints_quoted_command_without_notification(
+        self, refresh: mock.Mock, herdr_run: mock.Mock
+    ) -> None:
+        refresh.return_value = quota.RefreshOutcome(
+            codex=quota.CodexUsage(window(70, WEEK), NOW, "pro"),
+            claude=None,
+            codex_stale=False,
+            claude_stale=False,
+            grok=None,
+            grok_stale=False,
+        )
+
+        with (
+            mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            rc = quota.route_command(["medium", "--argv"])
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            stdout.getvalue().strip(),
+            "pi --provider openai-codex --model gpt-5.6-sol",
+        )
+        self.assertIn("pick: sol", stderr.getvalue())
+        herdr_run.assert_not_called()
+
+    def test_lane_command_maps_kinds_to_executables(self) -> None:
+        cursor = quota.LaneSpec("cursor", "cursor", (), "cursor", True)
+        unknown = quota.LaneSpec("odd", "zzz", ("--flag", "a b"), "zzz", True)
+
+        self.assertEqual(quota.lane_command(cursor), ["cursor-agent"])
+        self.assertEqual(quota.lane_command(unknown), ["zzz", "--flag", "a b"])
 
     @mock.patch("herdr_model_quota._run_herdr_command")
     @mock.patch("herdr_model_quota.refresh")
