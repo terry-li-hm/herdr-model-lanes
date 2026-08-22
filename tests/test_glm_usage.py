@@ -1,3 +1,4 @@
+import contextlib
 import json
 import tempfile
 import unittest
@@ -31,11 +32,51 @@ class FakeResponse:
         return json.dumps(self.payload).encode()
 
 
+@contextlib.contextmanager
+def isolated_lookup(
+    *,
+    pi_key: str | None = None,
+    env_resolved: dict[str, str] | None = None,
+    config_key: str | None = None,
+):
+    """Point helper file sources at a temp dir. Missing files stay missing."""
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        pi_path = root / "models.json"
+        env_path = root / "env.resolved"
+        config_path = root / "api_key"
+        if pi_key is not None:
+            pi_path.write_text(
+                json.dumps({"providers": {"bigmodel-coding": {"apiKey": pi_key}}}),
+                encoding="utf-8",
+            )
+        if env_resolved is not None:
+            env_path.write_text(
+                "".join(f"{name}={value}\n" for name, value in env_resolved.items()),
+                encoding="utf-8",
+            )
+        patches = [
+            mock.patch.object(helper, "PI_MODELS_FILENAME", pi_path),
+            mock.patch.object(helper, "ENV_RESOLVED_FILENAME", env_path),
+        ]
+        if config_key is not None:
+            config_path.write_text(f"{config_key}\n", encoding="utf-8")
+            patches.append(
+                mock.patch.object(helper, "CONFIG_KEY_FILES", ((config_path, True),))
+            )
+        else:
+            patches.append(mock.patch.object(helper, "CONFIG_KEY_FILES", ()))
+        with contextlib.ExitStack() as stack:
+            for patcher in patches:
+                stack.enter_context(patcher)
+            yield root
+
+
 class KeyLookupTests(unittest.TestCase):
     def test_env_order_wins_over_files(self) -> None:
-        with (
-            tempfile.TemporaryDirectory() as directory,
-            mock.patch.object(helper, "PI_MODELS_FILENAME", Path(directory) / "m"),
+        with isolated_lookup(
+            pi_key="pi-should-lose",
+            env_resolved={"ZHIPU_API_KEY": "file-should-lose"},
         ):
             key, base = helper.resolve_key(env_from({"ZAI_KEY": SYNTHETIC_KEY}))
 
@@ -66,34 +107,50 @@ class KeyLookupTests(unittest.TestCase):
         self.assertEqual(key, SYNTHETIC_KEY)
 
     def test_pi_models_json_is_used_after_env(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            models = Path(directory) / "models.json"
-            models.write_text(
-                json.dumps(
-                    {"providers": {"bigmodel-coding": {"apiKey": SYNTHETIC_KEY}}}
-                ),
-                encoding="utf-8",
-            )
-            with mock.patch.object(helper, "PI_MODELS_FILENAME", models):
-                key, base = helper.resolve_key(env_from({}))
+        with isolated_lookup(pi_key=SYNTHETIC_KEY):
+            key, base = helper.resolve_key(env_from({}))
 
         self.assertEqual(key, SYNTHETIC_KEY)
         self.assertEqual(base, helper.BIGMODEL_BASE)
 
+    def test_env_resolved_is_used_after_process_env(self) -> None:
+        with isolated_lookup(
+            pi_key="!sialyl-wrapped-pi-key",
+            env_resolved={"ZHIPU_API_KEY": SYNTHETIC_KEY},
+        ):
+            key, base = helper.resolve_key(env_from({}))
+
+        self.assertEqual(key, SYNTHETIC_KEY)
+        self.assertEqual(base, helper.BIGMODEL_BASE)
+
+    def test_process_env_beats_env_resolved(self) -> None:
+        with isolated_lookup(env_resolved={"ZHIPU_API_KEY": "file-should-lose"}):
+            key, _ = helper.resolve_key(env_from({"ZHIPU_API_KEY": SYNTHETIC_KEY}))
+
+        self.assertEqual(key, SYNTHETIC_KEY)
+
+    def test_quoted_env_resolved_value_is_unquoted(self) -> None:
+        with isolated_lookup() as root:
+            env_path = root / "quoted.env"
+            env_path.write_text(f'ZHIPU_API_KEY="{SYNTHETIC_KEY}"\n', encoding="utf-8")
+            with mock.patch.object(helper, "ENV_RESOLVED_FILENAME", env_path):
+                key, _ = helper.resolve_key(env_from({}))
+
+        self.assertEqual(key, SYNTHETIC_KEY)
+
     def test_dollar_prefixed_pi_key_is_treated_as_missing(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            models = Path(directory) / "models.json"
-            models.write_text(
-                json.dumps(
-                    {"providers": {"bigmodel-coding": {"apiKey": "$ZHIPU_API_KEY"}}}
-                ),
-                encoding="utf-8",
-            )
-            with (
-                mock.patch.object(helper, "PI_MODELS_FILENAME", models),
-                self.assertRaises(helper.GlmUsageError),
-            ):
-                helper.resolve_key(env_from({}))
+        with (
+            isolated_lookup(pi_key="$ZHIPU_API_KEY"),
+            self.assertRaises(helper.GlmUsageError),
+        ):
+            helper.resolve_key(env_from({}))
+
+    def test_bang_prefixed_pi_key_falls_through_to_config(self) -> None:
+        with isolated_lookup(pi_key="!sialyl-wrapped-pi-key", config_key=SYNTHETIC_KEY):
+            key, base = helper.resolve_key(env_from({}))
+
+        self.assertEqual(key, SYNTHETIC_KEY)
+        self.assertEqual(base, helper.BIGMODEL_BASE)
 
     def test_config_key_file_first_line(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -101,6 +158,9 @@ class KeyLookupTests(unittest.TestCase):
             key_file.write_text(f"{SYNTHETIC_KEY}\nsecond-line\n", encoding="utf-8")
             with (
                 mock.patch.object(helper, "PI_MODELS_FILENAME", Path(directory) / "m"),
+                mock.patch.object(
+                    helper, "ENV_RESOLVED_FILENAME", Path(directory) / "env"
+                ),
                 mock.patch.object(
                     helper,
                     "CONFIG_KEY_FILES",
@@ -114,8 +174,7 @@ class KeyLookupTests(unittest.TestCase):
 
     def test_missing_key_everywhere_is_unavailable(self) -> None:
         with (
-            mock.patch.object(helper, "PI_MODELS_FILENAME", Path("/nonexistent/m")),
-            mock.patch.object(helper, "CONFIG_KEY_FILES", ()),
+            isolated_lookup(),
             self.assertRaisesRegex(helper.GlmUsageError, "no GLM API key"),
         ):
             helper.resolve_key(env_from({}))

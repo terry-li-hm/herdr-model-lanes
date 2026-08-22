@@ -52,15 +52,16 @@ only when a Grok login exists on the machine.
 GLM (Z.ai / bigmodel coding plan) quota comes from the bundled `glm_usage.py`
 helper in the same shape. It is the sole credential boundary for GLM: the key
 is looked up from `ZHIPU_API_KEY`, `ZHIPUAI_API_KEY`, `ZAI_API_KEY`, `ZAI_KEY`,
-`BIGMODEL_API_KEY`, or `GLM_API_KEY` in the environment, then
-`~/.pi/agent/models.json` (`providers["bigmodel-coding"]["apiKey"]`, a literal
-key; `$`-prefixed references are ignored), then the first line of
+`BIGMODEL_API_KEY`, or `GLM_API_KEY` in the process environment, then the same
+names in `~/.env.resolved`, then `~/.pi/agent/models.json`
+(`providers["bigmodel-coding"]["apiKey"]`; `$`-prefixed env refs and
+`!`-prefixed sialyl wrappers are ignored), then the first line of
 `~/.config/zhipu/api_key` or `~/.config/bigmodel/api_key`. The helper calls
 `GET {base}/api/monitor/usage/quota/limit` with `Authorization: Bearer <key>`
 and prints only the normalized five-hour token window (the `TOKENS_LIMIT`
 entry with the nearest reset). The base is `https://open.bigmodel.cn` when the
 key came from a Zhipu/BigModel source and `https://api.z.ai` otherwise,
-overridable with `MODEL_LANES_GLM_BASE`. No key is ever stored, logged, or
+overridable with `MODEL_LANES_GLM_BASE`. Known limit (2026-08-22): the BigModel CN coding plan's monitor endpoint accepts the platform login token, not coding-plan API keys, and answers `code 500` to them, so on that plan `Gl` shows `n/a` and the `glm` lane ranks last; Z.ai global-plan keys are expected to work. No key is ever stored, logged, or
 cached. The `Gl` segment uses the same `!`/`!!`/`~` rules, refreshes at a
 five-minute cadence (the window is five hours), shows `Gl n/a` when no key is
 available, and the router judges it on a five-hour pace, not a weekly one.
@@ -164,7 +165,7 @@ additionally requires a Z.ai/BigModel API key from one of the sources above.
 Install the pinned release from GitHub:
 
 ```bash
-herdr plugin install terry-li-hm/herdr-model-lanes --ref v3.2.0
+herdr plugin install terry-li-hm/herdr-model-lanes --ref v3.2.1
 ```
 
 Then add the sidebar configuration above, run `herdr server reload-config`, and

@@ -1,10 +1,12 @@
 """Bundled GLM (Z.ai / bigmodel coding plan) usage helper.
 
 This module is the sole credential boundary for GLM quota. It looks up the
-API key from the environment, Pi's ``models.json``, or the Zhipu/BigModel
-config files, calls the Z.ai/BigModel quota endpoint, and prints only the
-normalized five-hour token window as JSON. The key never appears in argv,
-logs, caches, stdout errors, exception messages, or files.
+API key from the process environment, then ``~/.env.resolved``, then Pi's
+``models.json``, then the Zhipu/BigModel config files, calls the
+Z.ai/BigModel quota endpoint, and prints only the normalized five-hour token
+window as JSON. Keys that start with ``$`` (env refs) or ``!`` (sialyl
+wrappers) are skipped. The key never appears in argv, logs, caches, stdout
+errors, exception messages, or files.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 
-PLUGIN_VERSION = "3.2.0"
+PLUGIN_VERSION = "3.2.1"
 FETCH_TIMEOUT_SECS = 5
 MAX_RESPONSE_BYTES = 1 << 20
 USER_AGENT = f"herdr-model-lanes/{PLUGIN_VERSION} (GLM usage helper)"
@@ -33,7 +35,9 @@ ENV_KEY_NAMES = (
     "GLM_API_KEY",
 )
 BIGMODEL_ENV_NAMES = frozenset({"ZHIPU_API_KEY", "ZHIPUAI_API_KEY", "BIGMODEL_API_KEY"})
+UNUSABLE_KEY_PREFIXES = ("$", "!")
 PI_MODELS_FILENAME = Path.home() / ".pi" / "agent" / "models.json"
+ENV_RESOLVED_FILENAME = Path.home() / ".env.resolved"
 CONFIG_KEY_FILES = (
     (Path.home() / ".config" / "zhipu" / "api_key", True),
     (Path.home() / ".config" / "bigmodel" / "api_key", True),
@@ -44,14 +48,55 @@ class GlmUsageError(Exception):
     """Raised when usage cannot be obtained without exposing credentials."""
 
 
+def _usable_key(value: object) -> str | None:
+    """Return a quota token, or None for empty, env-ref, and sialyl-wrapped values."""
+    if not isinstance(value, str):
+        return None
+    key = value.strip()
+    if not key or key.startswith(UNUSABLE_KEY_PREFIXES):
+        return None
+    return key
+
+
+def _base_for_env_name(name: str) -> str:
+    return BIGMODEL_BASE if name in BIGMODEL_ENV_NAMES else ZAI_BASE
+
+
+def _read_env_file_value(path: Path, name: str) -> str | None:
+    """Read ``name`` from a KEY=value file. Never logs the value."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    prefix = f"{name}="
+    export_prefix = f"export {name}="
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith(export_prefix):
+            value = line[len(export_prefix) :]
+        elif line.startswith(prefix):
+            value = line[len(prefix) :]
+        else:
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        return _usable_key(value)
+    return None
+
+
 def _find_key(env: Callable[[str], str] | None = None) -> tuple[str, str] | None:
-    """Return ``(key, base)`` from the first source that has one."""
+    """Return ``(key, base)`` from the first source that has a usable key."""
     getenv = env if env is not None else os.environ.get
     for name in ENV_KEY_NAMES:
-        value = getenv(name)
+        value = _usable_key(getenv(name))
         if value:
-            base = BIGMODEL_BASE if name in BIGMODEL_ENV_NAMES else ZAI_BASE
-            return value, base
+            return value, _base_for_env_name(name)
+    for name in ENV_KEY_NAMES:
+        value = _read_env_file_value(ENV_RESOLVED_FILENAME, name)
+        if value:
+            return value, _base_for_env_name(name)
     try:
         document = json.loads(PI_MODELS_FILENAME.read_text(encoding="utf-8"))
         api_key = (
@@ -59,15 +104,17 @@ def _find_key(env: Callable[[str], str] | None = None) -> tuple[str, str] | None
         )
     except (OSError, ValueError):
         api_key = None
-    if isinstance(api_key, str) and api_key and not api_key.startswith("$"):
-        return api_key, BIGMODEL_BASE
+    usable = _usable_key(api_key)
+    if usable:
+        return usable, BIGMODEL_BASE
     for path, _is_bigmodel in CONFIG_KEY_FILES:
         try:
             first_line = path.read_text(encoding="utf-8").splitlines()[0].strip()
         except (OSError, IndexError):
             continue
-        if first_line:
-            return first_line, BIGMODEL_BASE
+        usable = _usable_key(first_line)
+        if usable:
+            return usable, BIGMODEL_BASE
     return None
 
 

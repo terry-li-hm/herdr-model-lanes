@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.2.1 - 2026-08-22
+
+### Fixed
+
+- GLM key lookup skips Pi `models.json` values that start with `!` (sialyl
+  wrappers) as well as `$` (env refs), and reads `~/.env.resolved` after the
+  process environment so the coding-plan `ZHIPU_API_KEY` is used instead of a
+  token that 500s on the quota API.
+
 ## 3.2.0 - 2026-08-22
 
 ### Added
