@@ -283,8 +283,12 @@ def _countdown(resets_at: int | None, now: int) -> str:
         return ""
     seconds_left = max(resets_at - now, 0)
     days, remainder = divmod(seconds_left, 86_400)
-    hours = remainder // 3_600
-    return f"{days}d{hours}h" if days else f"{hours}h"
+    hours, remainder = divmod(remainder, 3_600)
+    if days:
+        return f"{days}d{hours}h"
+    if hours:
+        return f"{hours}h"
+    return f"{remainder // 60}m"
 
 
 def _warning(remaining: int) -> str:
@@ -756,15 +760,18 @@ def query_glm(now: int | None = None, glm_command: list[str] | None = None) -> G
 
 
 def _herdr(herdr_bin: str, args: list[str]) -> dict:
-    completed = subprocess.run(
-        [herdr_bin, *args],
-        capture_output=True,
-        text=True,
-        timeout=SUBPROCESS_TIMEOUT_SECS,
-        check=False,
-    )
+    command = args[1] if len(args) > 1 else args[0]
+    try:
+        completed = subprocess.run(
+            [herdr_bin, *args],
+            capture_output=True,
+            text=True,
+            timeout=SUBPROCESS_TIMEOUT_SECS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise QuotaError(f"herdr {command} failed: {type(exc).__name__}") from exc
     if completed.returncode != 0:
-        command = args[1] if len(args) > 1 else args[0]
         raise QuotaError(f"herdr {command} failed: rc={completed.returncode}")
     try:
         return json.loads(completed.stdout or "{}")
@@ -998,7 +1005,10 @@ def refresh(
         glm if include_glm else UNSET,
         glm_stale,
     )
-    publish_to_focused_workspace(line, herdr_bin=herdr_bin)
+    try:
+        publish_to_focused_workspace(line, herdr_bin=herdr_bin)
+    except QuotaError:
+        pass
     print(line, file=sys.stdout if emit else sys.stderr, flush=True)
     errors = tuple(
         error for error in (codex_error, claude_error, grok_error, glm_error) if error
@@ -1073,7 +1083,7 @@ def load_class_spec(name: str, path: Path | None = None) -> ClassSpec:
 
 def _lane_health(window: QuotaWindow | None, now: int) -> float | None:
     """quota_left / time_left; ``None`` ranks the lane last."""
-    if window is None or window.resets_at is None:
+    if window is None or window.resets_at is None or window.resets_at <= now:
         return None
     time_left = max(
         (window.resets_at - now) / window.window_seconds,
@@ -1319,6 +1329,12 @@ def route_command(
         if chosen is None:
             print(
                 f"route: no lane {lane_override!r} in class {class_name!r}",
+                file=sys.stderr,
+            )
+            return 2
+        if classified and not chosen.classified_ok:
+            print(
+                f"route: lane {lane_override!r} is not classified-ok",
                 file=sys.stderr,
             )
             return 2

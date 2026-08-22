@@ -1,4 +1,5 @@
 import json
+import multiprocessing
 import sys
 import tempfile
 import tomllib
@@ -359,7 +360,41 @@ class RefreshTests(unittest.TestCase):
         )
 
 
+def _lock_writer(state_dir: str, remaining: int) -> None:
+    path = Path(state_dir) / quota.CODEX_CACHE_FILENAME
+    usage = quota.CodexUsage(window(100 - remaining, remaining, 10_000), NOW, "pro")
+    for _ in range(25):
+        with quota._cache_lock(path):
+            quota.save_codex_cache(path, usage)
+            loaded = quota.load_codex_cache(path)
+            if loaded is None:
+                raise RuntimeError("corrupt cache")
+
+
 class BackoffTests(unittest.TestCase):
+    @mock.patch("herdr_model_lanes.query_claude")
+    def test_stale_attempt_does_not_block_forced_refresh(
+        self, query_claude: mock.Mock
+    ) -> None:
+        refreshed = quota.ClaudeUsage(
+            weekly=window(9, 91, 20_000),
+            session=None,
+            sonnet=None,
+            fetched_at=NOW,
+        )
+        query_claude.return_value = refreshed
+        with tempfile.TemporaryDirectory() as directory:
+            cache_path = Path(directory) / quota.CLAUDE_CACHE_FILENAME
+            quota._save_attempt(quota._attempt_path(cache_path), NOW)
+            usage, stale, error = quota._refresh_claude(
+                True, cache_path, NOW, ["/trusted/claude-max-usage"]
+            )
+
+        query_claude.assert_called_once()
+        self.assertEqual(usage, refreshed)
+        self.assertFalse(stale)
+        self.assertIsNone(error)
+
     @mock.patch("herdr_model_lanes.query_claude")
     def test_failed_claude_attempt_is_backed_off_without_a_cache(
         self, query_claude: mock.Mock
@@ -379,12 +414,52 @@ class BackoffTests(unittest.TestCase):
         query_claude.assert_called_once()
 
 
+class LockTests(unittest.TestCase):
+    def test_concurrent_writers_do_not_corrupt_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            procs = [
+                multiprocessing.Process(
+                    target=_lock_writer, args=(directory, remaining)
+                )
+                for remaining in (10, 90)
+            ]
+            for proc in procs:
+                proc.start()
+            for proc in procs:
+                proc.join(timeout=15)
+            self.assertTrue(all(proc.exitcode == 0 for proc in procs))
+            loaded = quota.load_codex_cache(
+                Path(directory) / quota.CODEX_CACHE_FILENAME
+            )
+            self.assertIsNotNone(loaded)
+            self.assertIn(loaded.weekly.remaining_percent, (10, 90))
+
+
+class PublishResilienceTests(unittest.TestCase):
+    @mock.patch("herdr_model_lanes.query_claude")
+    def test_missing_herdr_does_not_abort_refresh(
+        self, query_claude: mock.Mock
+    ) -> None:
+        query_claude.side_effect = quota.QuotaError("no claude")
+        cached = quota.CodexUsage(window(20, 80, 10_000), NOW, "pro")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            quota.save_codex_cache(root / quota.CODEX_CACHE_FILENAME, cached)
+            outcome = quota.refresh(
+                state_dir=root,
+                now=NOW,
+                herdr_bin="/no-such-herdr-binary",
+            )
+
+        self.assertEqual(outcome.codex, cached)
+
+
 class ManifestTests(unittest.TestCase):
     def test_manifest_uses_model_quota_identity_and_local_commands(self) -> None:
         manifest = tomllib.loads(Path("herdr-plugin.toml").read_text())
 
         self.assertEqual(manifest["id"], "terry.herdr-model-lanes")
-        self.assertEqual(manifest["version"], "3.2.1")
+        self.assertEqual(manifest["version"], "3.3.0")
         self.assertEqual(manifest["min_herdr_version"], "0.8.0")
         self.assertEqual(manifest["platforms"], ["macos", "linux"])
         self.assertNotIn("build", manifest)

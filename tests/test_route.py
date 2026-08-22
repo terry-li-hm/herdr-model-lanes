@@ -1,5 +1,6 @@
 import io
 import json
+import random
 import tempfile
 import unittest
 from pathlib import Path
@@ -503,7 +504,7 @@ class RouteCommandTests(unittest.TestCase):
             mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
             mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
         ):
-            rc = quota.route_command(["medium", "--argv"])
+            rc = quota.route_command(["medium", "--argv"], now=NOW)
 
         self.assertEqual(rc, 0)
         self.assertEqual(
@@ -558,7 +559,7 @@ class RouteCommandTests(unittest.TestCase):
                 "HOME": "/Users/terry",
             },
         ):
-            rc = quota.route_command(["medium", "--launch"])
+            rc = quota.route_command(["medium", "--launch"], now=NOW)
 
         self.assertEqual(rc, 0)
         argvs = [call.args[1] for call in herdr_run.call_args_list]
@@ -619,3 +620,172 @@ class ShortWindowSurplusTests(unittest.TestCase):
         lane, rationale = quota.select_lane(spec, quotas, NOW)
         self.assertEqual(lane.name, "sol")
         self.assertIn("first healthy lane in order", rationale[-1])
+
+
+class ExpiredWindowTests(unittest.TestCase):
+    def test_past_reset_is_unavailable_not_infinitely_healthy(self) -> None:
+        spec = quota.load_class_spec("high")
+        quotas = {
+            "claude": quota.QuotaWindow(10, 90, NOW - 60),
+            "codex": window(50, WEEK),
+        }
+
+        lane, lines = quota.select_lane(spec, quotas, NOW)
+
+        self.assertEqual(lane.name, "sol")
+        self.assertTrue(any(line.startswith("fable: n/a") for line in lines))
+        self.assertNotIn("surplus before reset", lines[-1])
+
+    def test_expired_claude_does_not_beat_healthy_grok(self) -> None:
+        spec = medium_spec()
+        quotas = {
+            "codex": window(50, WEEK),
+            "claude": quota.QuotaWindow(10, 90, NOW - 3_600),
+            "grok": window(80, WEEK),
+            "glm": None,
+            "cursor": None,
+        }
+
+        lane, lines = quota.select_lane(spec, quotas, NOW)
+
+        self.assertEqual(lane.name, "grok")
+        self.assertTrue(any(line.startswith("opus: n/a") for line in lines))
+
+
+class CountdownTests(unittest.TestCase):
+    def test_sub_hour_reset_uses_minutes(self) -> None:
+        glm = quota.GlmUsage(
+            quota.QuotaWindow(1, 99, NOW + 30 * 60, quota.GLM_WINDOW_SECONDS), NOW
+        )
+
+        self.assertEqual(
+            quota.format_quota(None, None, NOW, glm=glm),
+            "Cx n/a | Cl n/a | Gl 99% · 30m",
+        )
+        self.assertEqual(quota._countdown(NOW + 30 * 60, NOW), "30m")
+        self.assertEqual(quota._countdown(NOW + 2 * 3_600, NOW), "2h")
+
+
+class ClassifiedOverrideTests(unittest.TestCase):
+    @mock.patch("herdr_model_lanes.refresh")
+    def test_classified_lane_override_rejects_glm(self, refresh: mock.Mock) -> None:
+        refresh.return_value = quota.RefreshOutcome(
+            codex=None,
+            claude=None,
+            codex_stale=False,
+            claude_stale=False,
+            grok=None,
+            grok_stale=False,
+        )
+
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            rc = quota.route_command(
+                ["medium", "--classified", "--argv", "--lane", "glm"]
+            )
+
+        self.assertEqual(rc, 2)
+        self.assertIn("classified-ok", stderr.getvalue())
+
+
+class StandaloneRouteTests(unittest.TestCase):
+    def test_argv_survives_missing_herdr(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            quota.save_codex_cache(
+                root / quota.CODEX_CACHE_FILENAME,
+                quota.CodexUsage(window(80, WEEK), NOW, "pro"),
+            )
+            with (
+                mock.patch.dict(
+                    "os.environ",
+                    {"HERDR_PLUGIN_STATE_DIR": str(root)},
+                    clear=True,
+                ),
+                mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+                mock.patch("sys.stderr", new_callable=io.StringIO),
+                mock.patch("herdr_model_lanes.query_claude") as query_claude,
+                mock.patch("herdr_model_lanes.query_grok") as query_grok,
+                mock.patch("herdr_model_lanes.query_glm") as query_glm,
+            ):
+                query_claude.side_effect = quota.QuotaError("no claude")
+                query_grok.side_effect = quota.QuotaError("no grok")
+                query_glm.side_effect = quota.QuotaError("no glm")
+                rc = quota.route_command(
+                    ["medium", "--argv"],
+                    herdr_bin="/no-such-herdr-binary",
+                    now=NOW,
+                )
+
+        self.assertEqual(rc, 0)
+        self.assertIn("pi --provider openai-codex", stdout.getvalue())
+
+
+class SelectLanePropertyTests(unittest.TestCase):
+    def test_seeded_windows_obey_selection_invariants(self) -> None:
+        spec = medium_spec()
+        names = {lane.name for lane in spec.lanes}
+        rng = random.Random(20260822)
+        for _ in range(200):
+            quotas: dict[str, quota.QuotaWindow | None] = {}
+            for key, window_seconds in (
+                ("codex", WEEK),
+                ("claude", WEEK),
+                ("grok", WEEK),
+                ("glm", quota.GLM_WINDOW_SECONDS),
+                ("cursor", WEEK),
+            ):
+                roll = rng.randrange(5)
+                if roll == 0:
+                    quotas[key] = None
+                elif roll == 1:
+                    remaining = rng.choice([0, 20, 50, 80, 100])
+                    quotas[key] = quota.QuotaWindow(
+                        100 - remaining,
+                        remaining,
+                        NOW - rng.randint(1, 10_000),
+                        window_seconds,
+                    )
+                else:
+                    remaining = rng.choice([0, 5, 10, 19, 20, 21, 50, 80, 99, 100])
+                    quotas[key] = quota.QuotaWindow(
+                        100 - remaining,
+                        remaining,
+                        NOW + rng.randint(1, WEEK),
+                        window_seconds,
+                    )
+            classified = bool(rng.getrandbits(1))
+            lane, lines = quota.select_lane(spec, quotas, NOW, classified=classified)
+            self.assertIn(lane.name, names)
+            if classified:
+                self.assertTrue(lane.classified_ok)
+            eligible = [
+                item for item in spec.lanes if not classified or item.classified_ok
+            ]
+            if all(
+                quota._lane_health(quotas.get(item.quota), NOW) is None
+                for item in eligible
+            ):
+                self.assertEqual(lane.name, eligible[0].name)
+            candidates = []
+            for item in eligible:
+                window = quotas.get(item.quota)
+                score = quota._lane_health(window, NOW)
+                if (
+                    window is not None
+                    and score is not None
+                    and score >= 1
+                    and max(0, min(100, window.remaining_percent)) >= 20
+                ):
+                    candidates.append(item)
+            if candidates:
+                picked_window = quotas.get(lane.quota)
+                self.assertIsNotNone(picked_window)
+                assert picked_window is not None
+                self.assertGreaterEqual(
+                    max(0, min(100, picked_window.remaining_percent)), 20
+                )
+            if "surplus before reset" in lines[-1]:
+                picked_window = quotas[lane.quota]
+                self.assertGreater(
+                    picked_window.window_seconds, quota.SURPLUS_RESET_WINDOW_SECS
+                )
