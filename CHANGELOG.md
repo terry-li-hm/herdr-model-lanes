@@ -1,5 +1,19 @@
 # Changelog
 
+## 3.4.0 - 2026-08-22
+
+### Added
+
+- Antigravity (`agy`) quota reader: the bundled `antigravity_usage.py` helper is
+  the sole credential boundary. It probes a same-user Antigravity.app
+  `language_server` (or a running `agy` CLI) on loopback, POSTs
+  `RetrieveUserQuotaSummary`, and prints only the tightest Gemini window. The
+  CSRF token is read from process argv and never logged, cached, or echoed.
+  The helper does not spawn `agy`; if the app and CLI are both closed, `Ag`
+  shows `n/a`. The `agy` lane sits in `medium` after Grok and before Cursor,
+  is not classified-safe, and `ag` can number-pick it to spend unused Google
+  quota instead of leaving it on the table.
+
 ## 3.2.1 - 2026-08-22
 
 ### Fixed

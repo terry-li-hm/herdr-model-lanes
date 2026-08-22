@@ -1,0 +1,25 @@
+{
+  "response": {
+    "groups": [
+      {
+        "displayName": "Gemini Models",
+        "buckets": [
+          {
+            "bucketId": "gemini-5h",
+            "displayName": "Five-Hour Limit Remaining",
+            "window": "five_hour",
+            "remaining": {"remainingFraction": 0.8},
+            "resetTime": "2026-08-22T14:10:41Z"
+          },
+          {
+            "bucketId": "gemini-weekly",
+            "displayName": "Weekly Limit Remaining",
+            "window": "weekly",
+            "remaining": {"remainingFraction": 1},
+            "resetTime": "2026-08-29T10:10:41Z"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -66,6 +66,20 @@ cached. The `Gl` segment uses the same `!`/`!!`/`~` rules, refreshes at a
 five-minute cadence (the window is five hours), shows `Gl n/a` when no key is
 available, and the router judges it on a five-hour pace, not a weekly one.
 
+Antigravity (Google `agy` CLI) quota comes from the bundled
+`antigravity_usage.py` helper in the same shape. It is the sole credential
+boundary for Antigravity: it discovers a same-user Antigravity.app
+`language_server` (preferred) or a running `agy` process from `ps`/`lsof`,
+reads the CSRF token from that process's argv when present, and POSTs
+`RetrieveUserQuotaSummary` to `127.0.0.1` only. The CSRF token never appears
+in argv constructed by this plugin, logs, caches, or errors. Self-signed TLS
+is accepted only for that loopback host. The helper does **not** spawn `agy`
+or the desktop app; if neither is already running, Antigravity displays as
+`Ag n/a`. The `Ag` segment uses the same `!`/`!!`/`~` rules and 30-minute
+cadence as Grok, and the router uses the tightest Gemini bucket (weekly, or
+five-hour when that is more constrained). Claude/GPT buckets on the same
+plan are not the routing window because a default `agy` session spends Gemini.
+
 ## Refresh, caching, and failure behavior
 
 Codex refreshes at most every five minutes. Claude refreshes at most every 30
@@ -114,11 +128,13 @@ the manifest. Two classes exist:
   the Claude Max window as its headroom.
 - **`medium`** — Sol 5.6, Opus 5 (`claude --model claude-opus-5`, quota
   claude), GLM-5.3 (`pi` on `bigmodel-coding`, quota glm, not
-  classified-safe), Grok 4.6 (grok), Cursor Agent (cursor, quota cursor). The
-  order follows Terminal-Bench 3.0 and vendor cards (Opus 5 42.7 vs Grok 4.6
-  26.5; GLM-5.3 28–32); Fable and Opus share the one Claude Max window, so the
-  health gate, not order, protects `high`: Opus is picked only while Claude is
-  on pace and above 20%.
+  classified-safe), Grok 4.6 (grok), Antigravity (`agy`, quota antigravity, not
+  classified-safe), Cursor Agent (cursor, quota cursor). The order follows
+  Terminal-Bench 3.0 and vendor cards (Opus 5 42.7 vs Grok 4.6 26.5; GLM-5.3
+  28–32); Fable and Opus share the one Claude Max window, so the health gate,
+  not order, protects `high`: Opus is picked only while Claude is on pace and
+  above 20%. `agy` is in the picker so unused Google quota can be spent by
+  confirmation or number override even when an earlier lane is healthy.
 
 For each lane the router computes
 `health = (remaining/100) / ((resets_at - now) / window_seconds)` and picks:
@@ -163,6 +179,8 @@ Requirements: Python 3.11+, Herdr 0.8+, and `codex` on `PATH`. Claude support
 additionally requires macOS with the Claude Code CLI signed in. Grok support
 additionally requires a Grok CLI login under `~/.grok`. GLM support
 additionally requires a Z.ai/BigModel API key from one of the sources above.
+Antigravity support additionally requires Antigravity.app or `agy` already
+running so the loopback quota server can be probed.
 
 Install the pinned release from GitHub:
 
@@ -191,9 +209,11 @@ credentials; deleting that directory removes every trace.
 - The Anthropic usage endpoint is unofficial and may break at any time; Claude
   numbers are best-effort and experimental.
 - Claude usage requires macOS because the token lives in the macOS Keychain.
-- Codex, Claude, and Grok are the only supported providers, and only
-  subscription (non-API-key) plans are reported. GLM and Cursor lanes have
-  no quota reader yet, so they route as `n/a` until readers land.
+- Codex, Claude, Grok, GLM, and Antigravity are the supported quota
+  providers, and only subscription (non-API-key) plans are reported. The
+  Cursor lane still has no reader, so it routes as `n/a` until one lands.
+  Antigravity quota is available only while Antigravity.app or `agy` is
+  already running.
 
 See `SECURITY.md` for the trust model and reporting channels.
 
@@ -201,7 +221,8 @@ See `SECURITY.md` for the trust model and reporting channels.
 
 ## Using `ag` without Herdr
 
-Herdr is only the front end. The quota readers talk to Codex, Anthropic and Grok
+Herdr is only the front end. The quota readers talk to Codex, Anthropic, Grok, GLM, and a local
+Antigravity server
 directly, lane selection is a pure function over their caches, and `ag` makes no
 Herdr call unless `HERDR_PANE_ID` is set. In any shell:
 
@@ -214,6 +235,7 @@ ag            # execs the chosen lane in this shell
 ```
 
 The Claude Max reader is macOS-only (Keychain); on Linux the Claude lanes show
-`n/a` and rank last, while Codex and Grok lanes route normally.
+`n/a` and rank last, while Codex, Grok, GLM, and Antigravity lanes route
+normally when their sources are present.
 
 Surplus applies only to windows longer than 48 hours; a five-hour window (GLM) always resets soon and refills anyway, so it never overrides class order on surplus alone.

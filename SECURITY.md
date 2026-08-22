@@ -4,8 +4,8 @@
 
 This plugin is credential-blind. `herdr_model_lanes.py` never reads the macOS
 Keychain, never constructs an `Authorization` header, and never sees an OAuth
-token. It queries the local Codex app-server over stdio and runs one bounded
-helper subprocess for Claude usage.
+or CSRF token. It queries the local Codex app-server over stdio and runs one
+bounded helper subprocess per provider that needs credentials.
 
 `claude_max_usage.py` is the sole credential boundary. On macOS it:
 
@@ -41,7 +41,12 @@ Keychain dumps, or account credentials in a report.
 
 ## Scope
 
-No network calls are made except the two described above (local Codex
-app-server stdio and the Anthropic usage endpoint). The plugin does not read
-Codex transcripts, does not install dependencies, and uses only the Python
-3.11+ standard library.
+The plugin does not read Codex transcripts, does not install dependencies,
+and uses only the Python 3.11+ standard library. Network calls are limited
+to the local Codex app-server, the Anthropic usage endpoint (Claude helper),
+the Grok billing endpoint (Grok helper), the Z.ai/BigModel quota endpoint
+(GLM helper), and loopback `127.0.0.1` Connect RPC (Antigravity helper).
+The Antigravity helper reads a CSRF token from a same-user process listing
+and sends it only as `X-Codeium-Csrf-Token` to loopback; it never logs or
+caches that token, and it refuses redirects and non-loopback hosts. Self-signed
+TLS is accepted only for `127.0.0.1`.

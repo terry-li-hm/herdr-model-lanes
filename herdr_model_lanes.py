@@ -1,11 +1,10 @@
-"""Herdr plugin: show Codex and Claude subscription capacity.
+"""Herdr plugin: show subscription capacity and route model-class lanes.
 
-Codex is queried through its local app-server. Claude Max usage is obtained
-from the bundled ``claude_max_usage.py`` helper subprocess, which owns OAuth
-and Keychain handling. Grok quota is obtained from the bundled
-``grok_usage.py`` helper subprocess in the same shape. The ``route``
-subcommand picks a model-class lane from the normalized caches at launch
-time. This plugin sees only normalized usage JSON and never credentials.
+Codex is queried through its local app-server. Claude Max, Grok, GLM, and
+Antigravity usage each come from a bundled helper subprocess that is the
+sole credential boundary for that provider. The ``route`` subcommand picks
+a model-class lane from the normalized caches at launch time. This plugin
+sees only normalized usage JSON and never credentials.
 """
 
 from __future__ import annotations
@@ -27,6 +26,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+import antigravity_usage
 import glm_usage
 
 WEEKLY_WINDOW_MINS = 10_080
@@ -41,6 +41,8 @@ GROK_HELPER_TIMEOUT_SECS = 12
 GLM_WINDOW_SECONDS = 5 * 3_600
 GLM_REFRESH_INTERVAL_SECS = 300
 GLM_HELPER_TIMEOUT_SECS = 12
+ANTIGRAVITY_REFRESH_INTERVAL_SECS = 1_800
+ANTIGRAVITY_HELPER_TIMEOUT_SECS = 12
 LAUNCH_TIMEOUT_SECS = 30
 PLUGIN_ID = "terry.herdr-model-lanes"
 TOKEN_NAME = "model_quota"
@@ -49,6 +51,7 @@ CODEX_CACHE_FILENAME = "codex-quota.json"
 CLAUDE_CACHE_FILENAME = "claude-quota.json"
 GROK_CACHE_FILENAME = "grok-quota.json"
 GLM_CACHE_FILENAME = "glm-quota.json"
+ANTIGRAVITY_CACHE_FILENAME = "antigravity-quota.json"
 CLASSES_FILENAME = "classes.toml"
 ROUTE_WINDOW_SECONDS = 604_800
 SURPLUS_HEALTH = 2.0
@@ -60,6 +63,7 @@ LANE_EXECUTABLES = {
     "cursor": "cursor-agent",
     "codex": "codex",
     "gemini": "gemini",
+    "agy": "agy",
 }
 UNSET = object()
 NON_SUBSCRIPTION_PLAN_MARKERS = ("api", "payg", "usage", "trial")
@@ -106,6 +110,12 @@ class GlmUsage:
 
 
 @dataclass(frozen=True)
+class AntigravityUsage:
+    gemini: QuotaWindow
+    fetched_at: int
+
+
+@dataclass(frozen=True)
 class RefreshOutcome:
     codex: CodexUsage | None
     claude: ClaudeUsage | None
@@ -116,6 +126,8 @@ class RefreshOutcome:
     grok_stale: bool = False
     glm: GlmUsage | None = None
     glm_stale: bool = False
+    antigravity: AntigravityUsage | None = None
+    antigravity_stale: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +254,33 @@ def parse_glm_usage(payload: dict, fetched_at: int) -> GlmUsage:
     return GlmUsage(five_hour=five_hour, fetched_at=fetched_at)
 
 
+def _parse_antigravity_window(value: object, field: str) -> QuotaWindow | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise QuotaError(f"{field} window is not an object")
+    used, remaining = _percent(value.get("used_percent"), f"{field} used percentage")
+    resets_at = _parse_timestamp(value.get("resets_at"), f"{field} resets_at")
+    window_seconds = value.get("window_seconds", ROUTE_WINDOW_SECONDS)
+    if not isinstance(window_seconds, (int, float)) or isinstance(window_seconds, bool):
+        raise QuotaError(f"{field} window_seconds is not numeric")
+    if window_seconds <= 0:
+        raise QuotaError(f"{field} window_seconds must be positive")
+    return QuotaWindow(used, remaining, resets_at, window_seconds=int(window_seconds))
+
+
+def parse_antigravity_usage(payload: dict, fetched_at: int) -> AntigravityUsage:
+    """Parse the normalized, credential-free output of the Antigravity helper."""
+    if not isinstance(payload, dict):
+        raise QuotaError("Antigravity helper payload is not an object")
+    gemini = _parse_antigravity_window(payload.get("gemini"), "Antigravity gemini")
+    if gemini is None:
+        raise QuotaError("Antigravity helper payload has no gemini window")
+    if gemini.resets_at is None:
+        raise QuotaError("Antigravity helper gemini window has no reset timestamp")
+    return AntigravityUsage(gemini=gemini, fetched_at=fetched_at)
+
+
 def _parse_claude_window(value: object, field: str) -> QuotaWindow | None:
     if value is None:
         return None
@@ -321,6 +360,8 @@ def format_quota(
     grok_stale: bool = False,
     glm: GlmUsage | None | object = UNSET,
     glm_stale: bool = False,
+    antigravity: AntigravityUsage | None | object = UNSET,
+    antigravity_stale: bool = False,
 ) -> str:
     codex_text = "Cx n/a"
     if codex is not None:
@@ -354,6 +395,16 @@ def format_quota(
         if glm_usage_obj is not None:
             glm_text = _format_window("Gl", glm_usage_obj.five_hour, now, glm_stale)
         line += f" | {glm_text}"
+    if antigravity is not UNSET:
+        antigravity_usage = (
+            antigravity if isinstance(antigravity, AntigravityUsage) else None
+        )
+        antigravity_text = "Ag n/a"
+        if antigravity_usage is not None:
+            antigravity_text = _format_window(
+                "Ag", antigravity_usage.gemini, now, antigravity_stale
+            )
+        line += f" | {antigravity_text}"
     return line
 
 
@@ -491,6 +542,37 @@ def load_glm_cache(path: Path) -> GlmUsage | None:
         if five_hour is None or five_hour.resets_at is None:
             return None
         return GlmUsage(five_hour, int(raw["fetched_at"]))
+    except (OSError, KeyError, TypeError, ValueError, QuotaError):
+        return None
+
+
+def save_antigravity_cache(path: Path, usage: AntigravityUsage) -> None:
+    payload = _window_to_dict(usage.gemini) or {}
+    payload["window_seconds"] = usage.gemini.window_seconds
+    _save_json(
+        path,
+        {"gemini": payload, "fetched_at": usage.fetched_at},
+    )
+
+
+def load_antigravity_cache(path: Path) -> AntigravityUsage | None:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        gemini_raw = raw["gemini"]
+        if not isinstance(gemini_raw, dict):
+            return None
+        used = int(gemini_raw["used_percent"])
+        remaining = int(gemini_raw["remaining_percent"])
+        resets_raw = gemini_raw.get("resets_at")
+        if resets_raw is None:
+            return None
+        window_seconds = int(gemini_raw.get("window_seconds", ROUTE_WINDOW_SECONDS))
+        if not 0 <= used <= 100 or not 0 <= remaining <= 100 or window_seconds <= 0:
+            return None
+        return AntigravityUsage(
+            QuotaWindow(used, remaining, int(resets_raw), window_seconds),
+            int(raw["fetched_at"]),
+        )
     except (OSError, KeyError, TypeError, ValueError, QuotaError):
         return None
 
@@ -733,6 +815,11 @@ def default_glm_command() -> list[str]:
     return [sys.executable, str(Path(__file__).with_name("glm_usage.py"))]
 
 
+def default_antigravity_command() -> list[str]:
+    """Default Antigravity helper invocation: current interpreter, bundled module."""
+    return [sys.executable, str(Path(__file__).with_name("antigravity_usage.py"))]
+
+
 def query_glm(now: int | None = None, glm_command: list[str] | None = None) -> GlmUsage:
     """Obtain normalized GLM usage from the bundled helper subprocess."""
     if now is None:
@@ -757,6 +844,38 @@ def query_glm(now: int | None = None, glm_command: list[str] | None = None) -> G
     except ValueError as exc:
         raise QuotaError("GLM helper returned invalid JSON") from exc
     return parse_glm_usage(payload, fetched_at=now)
+
+
+def query_antigravity(
+    now: int | None = None, antigravity_command: list[str] | None = None
+) -> AntigravityUsage:
+    """Obtain normalized Antigravity usage from the bundled helper subprocess."""
+    if now is None:
+        now = int(time.time())
+    command = (
+        antigravity_command
+        if antigravity_command is not None
+        else default_antigravity_command()
+    )
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=ANTIGRAVITY_HELPER_TIMEOUT_SECS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise QuotaError(
+            f"cannot obtain Antigravity usage from helper: {type(exc).__name__}"
+        ) from exc
+    if completed.returncode != 0:
+        raise QuotaError(f"Antigravity helper failed with rc={completed.returncode}")
+    try:
+        payload = json.loads(completed.stdout)
+    except ValueError as exc:
+        raise QuotaError("Antigravity helper returned invalid JSON") from exc
+    return parse_antigravity_usage(payload, fetched_at=now)
 
 
 def _herdr(herdr_bin: str, args: list[str]) -> dict:
@@ -943,6 +1062,39 @@ def _refresh_glm(
             return cached, cached is not None, str(exc)
 
 
+def _refresh_antigravity(
+    force: bool,
+    cache_path: Path,
+    now: int,
+    antigravity_command: list[str] | None,
+) -> tuple[AntigravityUsage | None, bool, str | None]:
+    with _cache_lock(cache_path):
+        cached = _discard_expired(cache_path, load_antigravity_cache(cache_path), now)
+        attempted_at = _load_attempt(_attempt_path(cache_path))
+        freshness = max(
+            cached.fetched_at if cached is not None else 0,
+            attempted_at or 0,
+        )
+        if (
+            not force
+            and freshness
+            and now - freshness < ANTIGRAVITY_REFRESH_INTERVAL_SECS
+        ):
+            failed_after_cache = (
+                cached is not None
+                and attempted_at is not None
+                and attempted_at > cached.fetched_at
+            )
+            return cached, failed_after_cache, None
+        _save_attempt(_attempt_path(cache_path), now)
+        try:
+            usage = query_antigravity(now=now, antigravity_command=antigravity_command)
+            save_antigravity_cache(cache_path, usage)
+            return usage, False, None
+        except QuotaError as exc:
+            return cached, cached is not None, str(exc)
+
+
 def state_dir_from_env() -> Path | None:
     """Resolve the cache directory: Herdr's variable first, then the standalone one."""
     for name in ("HERDR_PLUGIN_STATE_DIR", "MODEL_LANES_STATE_DIR"):
@@ -963,6 +1115,8 @@ def refresh(
     include_grok: bool = False,
     glm_command: list[str] | None = None,
     include_glm: bool = False,
+    antigravity_command: list[str] | None = None,
+    include_antigravity: bool = False,
     emit: bool = True,
 ) -> RefreshOutcome:
     if now is None:
@@ -994,6 +1148,16 @@ def refresh(
         glm, glm_stale, glm_error = _refresh_glm(
             force, state_dir / GLM_CACHE_FILENAME, now, glm_command
         )
+    antigravity: AntigravityUsage | None = None
+    antigravity_stale = False
+    antigravity_error: str | None = None
+    if include_antigravity:
+        antigravity, antigravity_stale, antigravity_error = _refresh_antigravity(
+            force,
+            state_dir / ANTIGRAVITY_CACHE_FILENAME,
+            now,
+            antigravity_command,
+        )
     line = format_quota(
         codex,
         claude,
@@ -1004,6 +1168,8 @@ def refresh(
         grok_stale,
         glm if include_glm else UNSET,
         glm_stale,
+        antigravity if include_antigravity else UNSET,
+        antigravity_stale,
     )
     try:
         publish_to_focused_workspace(line, herdr_bin=herdr_bin)
@@ -1011,7 +1177,15 @@ def refresh(
         pass
     print(line, file=sys.stdout if emit else sys.stderr, flush=True)
     errors = tuple(
-        error for error in (codex_error, claude_error, grok_error, glm_error) if error
+        error
+        for error in (
+            codex_error,
+            claude_error,
+            grok_error,
+            glm_error,
+            antigravity_error,
+        )
+        if error
     )
     return RefreshOutcome(
         codex,
@@ -1023,6 +1197,8 @@ def refresh(
         grok_stale,
         glm,
         glm_stale,
+        antigravity,
+        antigravity_stale,
     )
 
 
@@ -1313,6 +1489,7 @@ def route_command(
         herdr_bin=herdr_bin,
         include_grok=True,
         include_glm=True,
+        include_antigravity=True,
         emit=not argv_mode,
     )
     quotas: dict[str, QuotaWindow | None] = {
@@ -1320,6 +1497,7 @@ def route_command(
         "claude": outcome.claude.weekly if outcome.claude else None,
         "grok": outcome.grok.weekly if outcome.grok else None,
         "glm": outcome.glm.five_hour if outcome.glm else None,
+        "antigravity": outcome.antigravity.gemini if outcome.antigravity else None,
     }
     lane, rationale = select_lane(class_spec, quotas, now, classified=classified)
     if lane_override:
@@ -1369,6 +1547,7 @@ def main(argv: list[str]) -> int:
         force="--force" in argv,
         include_grok=include_grok,
         include_glm=glm_usage.key_available(),
+        include_antigravity=antigravity_usage.probe_available(),
     )
     return 0
 

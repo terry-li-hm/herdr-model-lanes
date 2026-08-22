@@ -28,7 +28,7 @@ class ClassSpecTests(unittest.TestCase):
         self.assertEqual(spec.name, "medium")
         self.assertEqual(
             [lane.name for lane in spec.lanes],
-            ["sol", "opus", "glm", "grok", "cursor"],
+            ["sol", "opus", "glm", "grok", "agy", "cursor"],
         )
         sol = spec.lanes[0]
         self.assertEqual(sol.kind, "pi")
@@ -48,7 +48,12 @@ class ClassSpecTests(unittest.TestCase):
         self.assertEqual(glm.quota, "glm")
         self.assertFalse(glm.classified_ok)
         self.assertEqual(spec.lanes[3].quota, "grok")
-        cursor = spec.lanes[4]
+        agy = spec.lanes[4]
+        self.assertEqual(agy.kind, "agy")
+        self.assertEqual(agy.args, ())
+        self.assertEqual(agy.quota, "antigravity")
+        self.assertFalse(agy.classified_ok)
+        cursor = spec.lanes[5]
         self.assertEqual(cursor.kind, "cursor")
         self.assertEqual(cursor.args, ())
         self.assertEqual(cursor.quota, "cursor")
@@ -435,6 +440,122 @@ class GlmTests(unittest.TestCase):
         self.assertIn("Gl n/a", publish.call_args.args[0])
 
 
+class AntigravityTests(unittest.TestCase):
+    def test_parse_antigravity_usage_from_helper_shape(self) -> None:
+        payload = {
+            "gemini": {
+                "used_percent": 0,
+                "remaining_percent": 100,
+                "resets_at": "2026-08-29T10:10:41Z",
+                "window_seconds": WEEK,
+            }
+        }
+
+        usage = quota.parse_antigravity_usage(payload, fetched_at=NOW)
+
+        self.assertEqual(usage.gemini.remaining_percent, 100)
+        self.assertEqual(usage.gemini.window_seconds, WEEK)
+
+    def test_rejects_missing_gemini_window(self) -> None:
+        with self.assertRaisesRegex(quota.QuotaError, "gemini"):
+            quota.parse_antigravity_usage({"gemini": None}, fetched_at=NOW)
+
+    def test_formats_ag_segment_after_gl(self) -> None:
+        antigravity = quota.AntigravityUsage(window(100, WEEK), NOW)
+
+        self.assertEqual(
+            quota.format_quota(
+                None, None, NOW, grok=None, glm=None, antigravity=antigravity
+            ),
+            "Cx n/a | Cl n/a | Gk n/a | Gl n/a | Ag 100% · 7d0h",
+        )
+
+    def test_ag_na_when_app_closed(self) -> None:
+        self.assertEqual(
+            quota.format_quota(None, None, NOW, antigravity=None),
+            "Cx n/a | Cl n/a | Ag n/a",
+        )
+
+    def test_antigravity_cache_round_trip(self) -> None:
+        usage = quota.AntigravityUsage(window(42, WEEK), NOW)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / quota.ANTIGRAVITY_CACHE_FILENAME
+            quota.save_antigravity_cache(path, usage)
+
+            loaded = quota.load_antigravity_cache(path)
+            self.assertEqual(loaded, usage)
+            self.assertEqual(set(json.loads(path.read_text())), {"gemini", "fetched_at"})
+
+    def test_route_picks_agy_when_it_is_the_only_healthy_lane(self) -> None:
+        spec = medium_spec()
+        quotas = {
+            "codex": window(5, WEEK),
+            "grok": window(5, WEEK),
+            "claude": window(5, WEEK),
+            "glm": window(5, WEEK),
+            "antigravity": window(100, WEEK),
+            "cursor": None,
+        }
+
+        lane, lines = quota.select_lane(spec, quotas, NOW)
+
+        self.assertEqual(lane.name, "agy")
+        self.assertIn("pick: agy", lines[-1])
+
+    def test_classified_drops_agy_lane(self) -> None:
+        spec = medium_spec()
+        quotas = {
+            "codex": window(5, WEEK),
+            "grok": window(5, WEEK),
+            "claude": window(5, WEEK),
+            "glm": window(100, 86_400),
+            "antigravity": window(100, WEEK),
+            "cursor": window(100, WEEK),
+        }
+
+        lane, lines = quota.select_lane(spec, quotas, NOW, classified=True)
+
+        self.assertEqual(lane.name, "cursor")
+        self.assertFalse(any("agy:" in line for line in lines))
+
+    @mock.patch("herdr_model_lanes.query_antigravity")
+    def test_antigravity_refreshes_on_thirty_minute_cadence(
+        self, query_antigravity: mock.Mock
+    ) -> None:
+        cached = quota.AntigravityUsage(window(100, WEEK), NOW - 1_000)
+        query_antigravity.return_value = quota.AntigravityUsage(window(90, WEEK), NOW)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / quota.ANTIGRAVITY_CACHE_FILENAME
+            quota.save_antigravity_cache(path, cached)
+            within = quota._refresh_antigravity(False, path, NOW - 1_000 + 1_500, None)
+            outside = quota._refresh_antigravity(False, path, NOW - 1_000 + 1_801, None)
+
+        self.assertEqual(within[0], cached)
+        self.assertEqual(outside[0].gemini.remaining_percent, 90)
+        query_antigravity.assert_called_once()
+
+    @mock.patch("herdr_model_lanes.publish_to_focused_workspace")
+    @mock.patch("herdr_model_lanes.query_codex")
+    @mock.patch("herdr_model_lanes.query_antigravity")
+    def test_refresh_includes_ag_segment_only_when_enabled(
+        self,
+        query_antigravity: mock.Mock,
+        query_codex: mock.Mock,
+        publish: mock.Mock,
+    ) -> None:
+        query_antigravity.side_effect = quota.QuotaError("Antigravity offline")
+        query_codex.side_effect = quota.QuotaError("Codex offline")
+
+        with tempfile.TemporaryDirectory() as directory:
+            outcome = quota.refresh(
+                state_dir=Path(directory), now=NOW, include_antigravity=True
+            )
+
+        self.assertIsNone(outcome.antigravity)
+        self.assertIn("Ag n/a", publish.call_args.args[0])
+
+
 class RouteCommandTests(unittest.TestCase):
     @mock.patch("herdr_model_lanes._run_herdr_command")
     @mock.patch("herdr_model_lanes.refresh")
@@ -516,9 +637,11 @@ class RouteCommandTests(unittest.TestCase):
 
     def test_lane_command_maps_kinds_to_executables(self) -> None:
         cursor = quota.LaneSpec("cursor", "cursor", (), "cursor", True)
+        agy = quota.LaneSpec("agy", "agy", (), "antigravity", False)
         unknown = quota.LaneSpec("odd", "zzz", ("--flag", "a b"), "zzz", True)
 
         self.assertEqual(quota.lane_command(cursor), ["cursor-agent"])
+        self.assertEqual(quota.lane_command(agy), ["agy"])
         self.assertEqual(quota.lane_command(unknown), ["zzz", "--flag", "a b"])
 
     @mock.patch("herdr_model_lanes._run_herdr_command")
@@ -732,6 +855,7 @@ class SelectLanePropertyTests(unittest.TestCase):
                 ("claude", WEEK),
                 ("grok", WEEK),
                 ("glm", quota.GLM_WINDOW_SECONDS),
+                ("antigravity", WEEK),
                 ("cursor", WEEK),
             ):
                 roll = rng.randrange(5)

@@ -16,7 +16,7 @@ quota = "codex"
 classified_ok = true
 
 [classes.medium]
-description = "Sol on Codex, Opus 5 on Claude Max, GLM-5.3, Grok 4.6 on SuperGrok, Cursor Agent"
+description = "Sol on Codex, Opus 5 on Claude Max, GLM-5.3, Grok 4.6 on SuperGrok, Antigravity (agy), Cursor Agent"
 
 [[classes.medium.lanes]]
 name = "sol"
@@ -45,6 +45,13 @@ kind = "grok"
 args = []
 quota = "grok"
 classified_ok = true
+
+[[classes.medium.lanes]]
+name = "agy"
+kind = "agy"
+args = []
+quota = "antigravity"
+classified_ok = false
 
 [[classes.medium.lanes]]
 name = "cursor"
