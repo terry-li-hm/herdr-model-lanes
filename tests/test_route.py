@@ -28,7 +28,7 @@ class ClassSpecTests(unittest.TestCase):
         self.assertEqual(spec.name, "medium")
         self.assertEqual(
             [lane.name for lane in spec.lanes],
-            ["sol", "opus", "glm", "grok", "agy", "cursor"],
+            ["sol", "opus", "glm", "grok", "agy", "kimi", "cursor"],
         )
         sol = spec.lanes[0]
         self.assertEqual(sol.kind, "pi")
@@ -53,7 +53,12 @@ class ClassSpecTests(unittest.TestCase):
         self.assertEqual(agy.args, ())
         self.assertEqual(agy.quota, "antigravity")
         self.assertFalse(agy.classified_ok)
-        cursor = spec.lanes[5]
+        kimi = spec.lanes[5]
+        self.assertEqual(kimi.kind, "kimi")
+        self.assertEqual(kimi.args, ())
+        self.assertEqual(kimi.quota, "kimi")
+        self.assertFalse(kimi.classified_ok)
+        cursor = spec.lanes[6]
         self.assertEqual(cursor.kind, "cursor")
         self.assertEqual(cursor.args, ())
         self.assertEqual(cursor.quota, "cursor")
@@ -556,6 +561,122 @@ class AntigravityTests(unittest.TestCase):
         self.assertIn("Ag n/a", publish.call_args.args[0])
 
 
+class KimiTests(unittest.TestCase):
+    def test_parse_kimi_usage_from_helper_shape(self) -> None:
+        payload = {
+            "coding": {
+                "used_percent": 0,
+                "remaining_percent": 100,
+                "resets_at": "2026-08-28T02:01:19Z",
+                "window_seconds": WEEK,
+            }
+        }
+
+        usage = quota.parse_kimi_usage(payload, fetched_at=NOW)
+
+        self.assertEqual(usage.coding.remaining_percent, 100)
+        self.assertEqual(usage.coding.window_seconds, WEEK)
+
+    def test_rejects_missing_coding_window(self) -> None:
+        with self.assertRaisesRegex(quota.QuotaError, "coding"):
+            quota.parse_kimi_usage({"coding": None}, fetched_at=NOW)
+
+    def test_formats_km_segment_after_ag(self) -> None:
+        kimi = quota.KimiUsage(window(100, WEEK), NOW)
+
+        self.assertEqual(
+            quota.format_quota(
+                None,
+                None,
+                NOW,
+                grok=None,
+                glm=None,
+                antigravity=None,
+                kimi=kimi,
+            ),
+            "Cx n/a | Cl n/a | Gk n/a | Gl n/a | Ag n/a | Km 100% · 7d0h",
+        )
+
+    def test_km_na_when_no_key(self) -> None:
+        self.assertEqual(
+            quota.format_quota(None, None, NOW, kimi=None),
+            "Cx n/a | Cl n/a | Km n/a",
+        )
+
+    def test_kimi_cache_round_trip(self) -> None:
+        usage = quota.KimiUsage(window(70, WEEK), NOW)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / quota.KIMI_CACHE_FILENAME
+            quota.save_kimi_cache(path, usage)
+
+            self.assertEqual(quota.load_kimi_cache(path), usage)
+            self.assertEqual(set(json.loads(path.read_text())), {"coding", "fetched_at"})
+
+    def test_route_picks_kimi_when_it_is_the_only_healthy_lane(self) -> None:
+        spec = medium_spec()
+        quotas = {
+            "codex": window(5, WEEK),
+            "grok": window(5, WEEK),
+            "claude": window(5, WEEK),
+            "glm": window(5, WEEK),
+            "antigravity": window(5, WEEK),
+            "kimi": window(100, WEEK),
+            "cursor": None,
+        }
+
+        lane, lines = quota.select_lane(spec, quotas, NOW)
+
+        self.assertEqual(lane.name, "kimi")
+        self.assertIn("pick: kimi", lines[-1])
+
+    def test_classified_drops_kimi_lane(self) -> None:
+        spec = medium_spec()
+        quotas = {
+            "codex": window(5, WEEK),
+            "grok": window(5, WEEK),
+            "claude": window(5, WEEK),
+            "glm": window(5, WEEK),
+            "antigravity": window(5, WEEK),
+            "kimi": window(100, WEEK),
+            "cursor": window(100, WEEK),
+        }
+
+        lane, lines = quota.select_lane(spec, quotas, NOW, classified=True)
+
+        self.assertEqual(lane.name, "cursor")
+        self.assertFalse(any("kimi:" in line for line in lines))
+
+    @mock.patch("herdr_model_lanes.query_kimi")
+    def test_kimi_refreshes_on_five_minute_cadence(self, query_kimi: mock.Mock) -> None:
+        cached = quota.KimiUsage(window(100, WEEK), NOW - 1_000)
+        query_kimi.return_value = quota.KimiUsage(window(90, WEEK), NOW)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / quota.KIMI_CACHE_FILENAME
+            quota.save_kimi_cache(path, cached)
+            within = quota._refresh_kimi(False, path, NOW - 1_000 + 200, None)
+            outside = quota._refresh_kimi(False, path, NOW - 1_000 + 301, None)
+
+        self.assertEqual(within[0], cached)
+        self.assertEqual(outside[0].coding.remaining_percent, 90)
+        query_kimi.assert_called_once()
+
+    @mock.patch("herdr_model_lanes.publish_to_focused_workspace")
+    @mock.patch("herdr_model_lanes.query_codex")
+    @mock.patch("herdr_model_lanes.query_kimi")
+    def test_refresh_includes_km_segment_only_when_enabled(
+        self, query_kimi: mock.Mock, query_codex: mock.Mock, publish: mock.Mock
+    ) -> None:
+        query_kimi.side_effect = quota.QuotaError("Kimi offline")
+        query_codex.side_effect = quota.QuotaError("Codex offline")
+
+        with tempfile.TemporaryDirectory() as directory:
+            outcome = quota.refresh(state_dir=Path(directory), now=NOW, include_kimi=True)
+
+        self.assertIsNone(outcome.kimi)
+        self.assertIn("Km n/a", publish.call_args.args[0])
+
+
 class RouteCommandTests(unittest.TestCase):
     @mock.patch("herdr_model_lanes._run_herdr_command")
     @mock.patch("herdr_model_lanes.refresh")
@@ -642,6 +763,8 @@ class RouteCommandTests(unittest.TestCase):
 
         self.assertEqual(quota.lane_command(cursor), ["cursor-agent"])
         self.assertEqual(quota.lane_command(agy), ["agy"])
+        kimi = quota.LaneSpec("kimi", "kimi", (), "kimi", False)
+        self.assertEqual(quota.lane_command(kimi), ["kimi"])
         self.assertEqual(quota.lane_command(unknown), ["zzz", "--flag", "a b"])
 
     @mock.patch("herdr_model_lanes._run_herdr_command")
@@ -856,6 +979,7 @@ class SelectLanePropertyTests(unittest.TestCase):
                 ("grok", WEEK),
                 ("glm", quota.GLM_WINDOW_SECONDS),
                 ("antigravity", WEEK),
+                ("kimi", WEEK),
                 ("cursor", WEEK),
             ):
                 roll = rng.randrange(5)

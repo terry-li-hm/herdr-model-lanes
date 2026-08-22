@@ -28,6 +28,7 @@ from pathlib import Path
 
 import antigravity_usage
 import glm_usage
+import kimi_usage
 
 WEEKLY_WINDOW_MINS = 10_080
 WEEKLY_TOLERANCE_MINS = 240
@@ -43,6 +44,8 @@ GLM_REFRESH_INTERVAL_SECS = 300
 GLM_HELPER_TIMEOUT_SECS = 12
 ANTIGRAVITY_REFRESH_INTERVAL_SECS = 1_800
 ANTIGRAVITY_HELPER_TIMEOUT_SECS = 12
+KIMI_REFRESH_INTERVAL_SECS = 300
+KIMI_HELPER_TIMEOUT_SECS = 12
 LAUNCH_TIMEOUT_SECS = 30
 PLUGIN_ID = "terry.herdr-model-lanes"
 TOKEN_NAME = "model_quota"
@@ -52,6 +55,7 @@ CLAUDE_CACHE_FILENAME = "claude-quota.json"
 GROK_CACHE_FILENAME = "grok-quota.json"
 GLM_CACHE_FILENAME = "glm-quota.json"
 ANTIGRAVITY_CACHE_FILENAME = "antigravity-quota.json"
+KIMI_CACHE_FILENAME = "kimi-quota.json"
 CLASSES_FILENAME = "classes.toml"
 ROUTE_WINDOW_SECONDS = 604_800
 SURPLUS_HEALTH = 2.0
@@ -64,6 +68,7 @@ LANE_EXECUTABLES = {
     "codex": "codex",
     "gemini": "gemini",
     "agy": "agy",
+    "kimi": "kimi",
 }
 UNSET = object()
 NON_SUBSCRIPTION_PLAN_MARKERS = ("api", "payg", "usage", "trial")
@@ -116,6 +121,12 @@ class AntigravityUsage:
 
 
 @dataclass(frozen=True)
+class KimiUsage:
+    coding: QuotaWindow
+    fetched_at: int
+
+
+@dataclass(frozen=True)
 class RefreshOutcome:
     codex: CodexUsage | None
     claude: ClaudeUsage | None
@@ -128,6 +139,8 @@ class RefreshOutcome:
     glm_stale: bool = False
     antigravity: AntigravityUsage | None = None
     antigravity_stale: bool = False
+    kimi: KimiUsage | None = None
+    kimi_stale: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +294,18 @@ def parse_antigravity_usage(payload: dict, fetched_at: int) -> AntigravityUsage:
     return AntigravityUsage(gemini=gemini, fetched_at=fetched_at)
 
 
+def parse_kimi_usage(payload: dict, fetched_at: int) -> KimiUsage:
+    """Parse the normalized, credential-free output of the Kimi helper."""
+    if not isinstance(payload, dict):
+        raise QuotaError("Kimi helper payload is not an object")
+    coding = _parse_antigravity_window(payload.get("coding"), "Kimi coding")
+    if coding is None:
+        raise QuotaError("Kimi helper payload has no coding window")
+    if coding.resets_at is None:
+        raise QuotaError("Kimi helper coding window has no reset timestamp")
+    return KimiUsage(coding=coding, fetched_at=fetched_at)
+
+
 def _parse_claude_window(value: object, field: str) -> QuotaWindow | None:
     if value is None:
         return None
@@ -362,6 +387,8 @@ def format_quota(
     glm_stale: bool = False,
     antigravity: AntigravityUsage | None | object = UNSET,
     antigravity_stale: bool = False,
+    kimi: KimiUsage | None | object = UNSET,
+    kimi_stale: bool = False,
 ) -> str:
     codex_text = "Cx n/a"
     if codex is not None:
@@ -405,6 +432,12 @@ def format_quota(
                 "Ag", antigravity_usage.gemini, now, antigravity_stale
             )
         line += f" | {antigravity_text}"
+    if kimi is not UNSET:
+        kimi_usage_obj = kimi if isinstance(kimi, KimiUsage) else None
+        kimi_text = "Km n/a"
+        if kimi_usage_obj is not None:
+            kimi_text = _format_window("Km", kimi_usage_obj.coding, now, kimi_stale)
+        line += f" | {kimi_text}"
     return line
 
 
@@ -570,6 +603,34 @@ def load_antigravity_cache(path: Path) -> AntigravityUsage | None:
         if not 0 <= used <= 100 or not 0 <= remaining <= 100 or window_seconds <= 0:
             return None
         return AntigravityUsage(
+            QuotaWindow(used, remaining, int(resets_raw), window_seconds),
+            int(raw["fetched_at"]),
+        )
+    except (OSError, KeyError, TypeError, ValueError, QuotaError):
+        return None
+
+
+def save_kimi_cache(path: Path, usage: KimiUsage) -> None:
+    payload = _window_to_dict(usage.coding) or {}
+    payload["window_seconds"] = usage.coding.window_seconds
+    _save_json(path, {"coding": payload, "fetched_at": usage.fetched_at})
+
+
+def load_kimi_cache(path: Path) -> KimiUsage | None:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        coding_raw = raw["coding"]
+        if not isinstance(coding_raw, dict):
+            return None
+        used = int(coding_raw["used_percent"])
+        remaining = int(coding_raw["remaining_percent"])
+        resets_raw = coding_raw.get("resets_at")
+        if resets_raw is None:
+            return None
+        window_seconds = int(coding_raw.get("window_seconds", ROUTE_WINDOW_SECONDS))
+        if not 0 <= used <= 100 or not 0 <= remaining <= 100 or window_seconds <= 0:
+            return None
+        return KimiUsage(
             QuotaWindow(used, remaining, int(resets_raw), window_seconds),
             int(raw["fetched_at"]),
         )
@@ -878,6 +939,37 @@ def query_antigravity(
     return parse_antigravity_usage(payload, fetched_at=now)
 
 
+def default_kimi_command() -> list[str]:
+    """Default Kimi helper invocation: current interpreter, bundled module."""
+    return [sys.executable, str(Path(__file__).with_name("kimi_usage.py"))]
+
+
+def query_kimi(now: int | None = None, kimi_command: list[str] | None = None) -> KimiUsage:
+    """Obtain normalized Kimi Code usage from the bundled helper subprocess."""
+    if now is None:
+        now = int(time.time())
+    command = kimi_command if kimi_command is not None else default_kimi_command()
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=KIMI_HELPER_TIMEOUT_SECS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise QuotaError(
+            f"cannot obtain Kimi usage from helper: {type(exc).__name__}"
+        ) from exc
+    if completed.returncode != 0:
+        raise QuotaError(f"Kimi helper failed with rc={completed.returncode}")
+    try:
+        payload = json.loads(completed.stdout)
+    except ValueError as exc:
+        raise QuotaError("Kimi helper returned invalid JSON") from exc
+    return parse_kimi_usage(payload, fetched_at=now)
+
+
 def _herdr(herdr_bin: str, args: list[str]) -> dict:
     command = args[1] if len(args) > 1 else args[0]
     try:
@@ -1095,6 +1187,35 @@ def _refresh_antigravity(
             return cached, cached is not None, str(exc)
 
 
+def _refresh_kimi(
+    force: bool,
+    cache_path: Path,
+    now: int,
+    kimi_command: list[str] | None,
+) -> tuple[KimiUsage | None, bool, str | None]:
+    with _cache_lock(cache_path):
+        cached = _discard_expired(cache_path, load_kimi_cache(cache_path), now)
+        attempted_at = _load_attempt(_attempt_path(cache_path))
+        freshness = max(
+            cached.fetched_at if cached is not None else 0,
+            attempted_at or 0,
+        )
+        if not force and freshness and now - freshness < KIMI_REFRESH_INTERVAL_SECS:
+            failed_after_cache = (
+                cached is not None
+                and attempted_at is not None
+                and attempted_at > cached.fetched_at
+            )
+            return cached, failed_after_cache, None
+        _save_attempt(_attempt_path(cache_path), now)
+        try:
+            usage = query_kimi(now=now, kimi_command=kimi_command)
+            save_kimi_cache(cache_path, usage)
+            return usage, False, None
+        except QuotaError as exc:
+            return cached, cached is not None, str(exc)
+
+
 def state_dir_from_env() -> Path | None:
     """Resolve the cache directory: Herdr's variable first, then the standalone one."""
     for name in ("HERDR_PLUGIN_STATE_DIR", "MODEL_LANES_STATE_DIR"):
@@ -1117,6 +1238,8 @@ def refresh(
     include_glm: bool = False,
     antigravity_command: list[str] | None = None,
     include_antigravity: bool = False,
+    kimi_command: list[str] | None = None,
+    include_kimi: bool = False,
     emit: bool = True,
 ) -> RefreshOutcome:
     if now is None:
@@ -1158,6 +1281,13 @@ def refresh(
             now,
             antigravity_command,
         )
+    kimi: KimiUsage | None = None
+    kimi_stale = False
+    kimi_error: str | None = None
+    if include_kimi:
+        kimi, kimi_stale, kimi_error = _refresh_kimi(
+            force, state_dir / KIMI_CACHE_FILENAME, now, kimi_command
+        )
     line = format_quota(
         codex,
         claude,
@@ -1170,6 +1300,8 @@ def refresh(
         glm_stale,
         antigravity if include_antigravity else UNSET,
         antigravity_stale,
+        kimi if include_kimi else UNSET,
+        kimi_stale,
     )
     try:
         publish_to_focused_workspace(line, herdr_bin=herdr_bin)
@@ -1184,6 +1316,7 @@ def refresh(
             grok_error,
             glm_error,
             antigravity_error,
+            kimi_error,
         )
         if error
     )
@@ -1199,6 +1332,8 @@ def refresh(
         glm_stale,
         antigravity,
         antigravity_stale,
+        kimi,
+        kimi_stale,
     )
 
 
@@ -1490,6 +1625,7 @@ def route_command(
         include_grok=True,
         include_glm=True,
         include_antigravity=True,
+        include_kimi=True,
         emit=not argv_mode,
     )
     quotas: dict[str, QuotaWindow | None] = {
@@ -1498,6 +1634,7 @@ def route_command(
         "grok": outcome.grok.weekly if outcome.grok else None,
         "glm": outcome.glm.five_hour if outcome.glm else None,
         "antigravity": outcome.antigravity.gemini if outcome.antigravity else None,
+        "kimi": outcome.kimi.coding if outcome.kimi else None,
     }
     lane, rationale = select_lane(class_spec, quotas, now, classified=classified)
     if lane_override:
@@ -1548,6 +1685,7 @@ def main(argv: list[str]) -> int:
         include_grok=include_grok,
         include_glm=glm_usage.key_available(),
         include_antigravity=antigravity_usage.probe_available(),
+        include_kimi=kimi_usage.key_available(),
     )
     return 0
 

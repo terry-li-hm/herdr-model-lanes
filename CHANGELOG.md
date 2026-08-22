@@ -1,5 +1,20 @@
 # Changelog
 
+## 3.5.0 - 2026-08-22
+
+### Added
+
+- Kimi Code (`kimi`) quota reader: the bundled `kimi_usage.py` helper is the
+  sole credential boundary. It reads `KIMI_CODE_API_KEY` from the process
+  environment, then `~/.env.resolved`, then a still-fresh access token from
+  `~/.kimi-code/credentials/kimi-code.json`, calls
+  `GET https://api.kimi.com/coding/v1/usages`, and prints only the tightest
+  coding window (weekly, or the five-hour rate limit when that is more
+  constrained). Moonshot Open Platform keys are ignored. The helper never
+  reads or uses the CLI refresh token. The `kimi` lane sits in `medium`
+  after Antigravity and before Cursor, is not classified-safe, and `ag` can
+  number-pick it to spend unused Kimi Code quota.
+
 ## 3.4.0 - 2026-08-22
 
 ### Added

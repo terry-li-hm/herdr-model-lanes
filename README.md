@@ -80,6 +80,19 @@ cadence as Grok, and the router uses the tightest Gemini bucket (weekly, or
 five-hour when that is more constrained). Claude/GPT buckets on the same
 plan are not the routing window because a default `agy` session spends Gemini.
 
+Kimi Code quota comes from the bundled `kimi_usage.py` helper in the same
+shape. It is the sole credential boundary for Kimi Code: the key is looked
+up from `KIMI_CODE_API_KEY` in the process environment, then
+`~/.env.resolved`, then a still-fresh `access_token` in
+`~/.kimi-code/credentials/kimi-code.json`. Moonshot Open Platform keys
+(`MOONSHOT_API_KEY`, `KIMI_API_KEY`) are a different product and are
+ignored. The helper calls `GET https://api.kimi.com/coding/v1/usages` and
+prints only the tightest coding window (weekly membership, or the five-hour
+rate limit when that remaining fraction is lower). It never reads or uses
+the CLI refresh token, and the key never appears in argv, logs, caches, or
+errors. The `Km` segment uses the same `!`/`!!`/`~` rules and a five-minute
+cadence because a five-hour window can be the routing meter.
+
 ## Refresh, caching, and failure behavior
 
 Codex refreshes at most every five minutes. Claude refreshes at most every 30
@@ -129,12 +142,14 @@ the manifest. Two classes exist:
 - **`medium`** — Sol 5.6, Opus 5 (`claude --model claude-opus-5`, quota
   claude), GLM-5.3 (`pi` on `bigmodel-coding`, quota glm, not
   classified-safe), Grok 4.6 (grok), Antigravity (`agy`, quota antigravity, not
-  classified-safe), Cursor Agent (cursor, quota cursor). The order follows
-  Terminal-Bench 3.0 and vendor cards (Opus 5 42.7 vs Grok 4.6 26.5; GLM-5.3
-  28–32); Fable and Opus share the one Claude Max window, so the health gate,
-  not order, protects `high`: Opus is picked only while Claude is on pace and
-  above 20%. `agy` is in the picker so unused Google quota can be spent by
-  confirmation or number override even when an earlier lane is healthy.
+  classified-safe), Kimi Code (`kimi`, quota kimi, not classified-safe),
+  Cursor Agent (cursor, quota cursor). The order follows Terminal-Bench 3.0
+  and vendor cards (Opus 5 42.7 vs Grok 4.6 26.5; GLM-5.3 28–32); Fable and
+  Opus share the one Claude Max window, so the health gate, not order,
+  protects `high`: Opus is picked only while Claude is on pace and above
+  20%. `agy` and `kimi` are in the picker so unused Google and Kimi Code
+  quota can be spent by confirmation or number override even when an earlier
+  lane is healthy.
 
 For each lane the router computes
 `health = (remaining/100) / ((resets_at - now) / window_seconds)` and picks:
@@ -180,7 +195,8 @@ additionally requires macOS with the Claude Code CLI signed in. Grok support
 additionally requires a Grok CLI login under `~/.grok`. GLM support
 additionally requires a Z.ai/BigModel API key from one of the sources above.
 Antigravity support additionally requires Antigravity.app or `agy` already
-running so the loopback quota server can be probed.
+running so the loopback quota server can be probed. Kimi Code support
+additionally requires `KIMI_CODE_API_KEY` or a signed-in Kimi Code CLI.
 
 Install the pinned release from GitHub:
 
@@ -209,11 +225,11 @@ credentials; deleting that directory removes every trace.
 - The Anthropic usage endpoint is unofficial and may break at any time; Claude
   numbers are best-effort and experimental.
 - Claude usage requires macOS because the token lives in the macOS Keychain.
-- Codex, Claude, Grok, GLM, and Antigravity are the supported quota
-  providers, and only subscription (non-API-key) plans are reported. The
-  Cursor lane still has no reader, so it routes as `n/a` until one lands.
-  Antigravity quota is available only while Antigravity.app or `agy` is
-  already running.
+- Codex, Claude, Grok, GLM, Antigravity, and Kimi Code are the supported
+  quota providers. The Cursor lane still has no reader, so it routes as
+  `n/a` until one lands. Antigravity quota is available only while
+  Antigravity.app or `agy` is already running. Kimi Code uses the coding
+  membership API, not Moonshot Open Platform balance.
 
 See `SECURITY.md` for the trust model and reporting channels.
 
