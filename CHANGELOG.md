@@ -9,6 +9,18 @@
   process environment so the coding-plan `ZHIPU_API_KEY` is used instead of a
   token that 500s on the quota API.
 
+## 3.3.1 - 2026-08-22
+
+Hardening from three Grok Build review lanes (functional, credential boundary,
+Linux): expired windows rank as n/a instead of infinitely healthy; routing and
+`ag` work when `herdr` is missing or failing; `--classified --lane` refuses a
+non-classified lane; sub-hour resets show minutes; helper outputs are
+validated before they reach stdout (no passthrough of untrusted strings),
+1 MiB bodies are rejected before `json.loads`, nested JSON and non-UTF-8
+helper output degrade to n/a instead of crashing the row; `ag` removes its
+temp file before exec; manifest version matches the changelog. README medium
+order matches `classes.toml`. Verified on Ubuntu 24.04 / Python 3.12.
+
 ## 3.3.0 - 2026-08-22
 
 `ag` shows each lane's quota with the suggestion marked and waits for Enter / a
