@@ -39,9 +39,25 @@ if [ -n "$explain" ]; then
     exec python3 "$plugin_dir/herdr_model_quota.py" route "$class" $explain $classified
 fi
 
-argv=$(python3 "$plugin_dir/herdr_model_quota.py" route "$class" --argv $classified)
+rationale=$(mktemp "${TMPDIR:-/tmp}/ag.XXXXXX")
+trap 'rm -f "$rationale"' EXIT
+argv=$(python3 "$plugin_dir/herdr_model_quota.py" route "$class" --argv $classified 2>"$rationale") || true
+cat "$rationale" >&2
 if [ -z "$argv" ]; then
     echo "ag: no argv produced for class $class" >&2
     exit 1
+fi
+pick=$(grep '^pick:' "$rationale" | tail -n 1)
+lane=${pick#pick: }; lane=${lane%% *}
+
+# Keep the decision visible after the agent TUI takes the screen.
+if [ -n "${HERDR_PANE_ID:-}" ] && command -v herdr >/dev/null 2>&1; then
+    herdr pane rename "$HERDR_PANE_ID" "$class: $lane" >/dev/null 2>&1 || true
+    herdr notification show "ag $class -> $lane" --body "$pick" >/dev/null 2>&1 || true
+fi
+delay=${AG_DELAY:-3}
+if [ "$delay" -gt 0 ] 2>/dev/null; then
+    printf 'ag: starting %s in %ss (Ctrl-C to abort; ag --explain to read without launching)\n' "$lane" "$delay" >&2
+    sleep "$delay"
 fi
 eval exec "$argv"

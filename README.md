@@ -176,3 +176,5 @@ credentials; deleting that directory removes every trace.
   no quota reader yet, so they route as `n/a` until readers land.
 
 See `SECURITY.md` for the trust model and reporting channels.
+
+`ag` pauses `AG_DELAY` seconds (default 3) before exec so the rationale can be read, renames the Herdr pane to `<class>: <lane>`, and shows the pick as a Herdr notification when run inside Herdr.
