@@ -147,7 +147,7 @@ additionally requires a Grok CLI login under `~/.grok`.
 Install the pinned release from GitHub:
 
 ```bash
-herdr plugin install terry-li-hm/herdr-model-quota --ref v2.2.0
+herdr plugin install terry-li-hm/herdr-model-quota --ref v2.3.0
 ```
 
 Then add the sidebar configuration above, run `herdr server reload-config`, and

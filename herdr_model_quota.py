@@ -813,6 +813,7 @@ def refresh(
     claude_command: list[str] | None = None,
     grok_command: list[str] | None = None,
     include_grok: bool = False,
+    emit: bool = True,
 ) -> RefreshOutcome:
     if now is None:
         now = int(time.time())
@@ -820,7 +821,7 @@ def refresh(
         state_value = os.environ.get("HERDR_PLUGIN_STATE_DIR")
         if not state_value:
             line = format_quota(None, None, now)
-            print(line, flush=True)
+            print(line, file=sys.stdout if emit else sys.stderr, flush=True)
             return RefreshOutcome(None, None, False, False, ("no state dir",))
         state_dir = Path(state_value)
 
@@ -847,7 +848,7 @@ def refresh(
         grok_stale,
     )
     publish_to_focused_workspace(line, herdr_bin=herdr_bin)
-    print(line, flush=True)
+    print(line, file=sys.stdout if emit else sys.stderr, flush=True)
     errors = tuple(error for error in (codex_error, claude_error, grok_error) if error)
     return RefreshOutcome(
         codex, claude, codex_stale, claude_stale, errors, grok, grok_stale
@@ -1126,7 +1127,11 @@ def route_command(
     state_value = os.environ.get("HERDR_PLUGIN_STATE_DIR")
     state_dir = Path(state_value) if state_value else None
     outcome = refresh(
-        state_dir=state_dir, now=now, herdr_bin=herdr_bin, include_grok=True
+        state_dir=state_dir,
+        now=now,
+        herdr_bin=herdr_bin,
+        include_grok=True,
+        emit=not argv_mode,
     )
     quotas: dict[str, QuotaWindow | None] = {
         "codex": outcome.codex.weekly if outcome.codex else None,
