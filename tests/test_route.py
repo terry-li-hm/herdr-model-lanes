@@ -27,7 +27,7 @@ class ClassSpecTests(unittest.TestCase):
         self.assertEqual(spec.name, "medium")
         self.assertEqual(
             [lane.name for lane in spec.lanes],
-            ["sol", "grok", "opus", "glm", "cursor"],
+            ["sol", "opus", "glm", "grok", "cursor"],
         )
         sol = spec.lanes[0]
         self.assertEqual(sol.kind, "pi")
