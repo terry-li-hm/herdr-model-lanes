@@ -36,17 +36,17 @@ class ClassSpecTests(unittest.TestCase):
         )
         self.assertEqual(sol.quota, "codex")
         self.assertTrue(sol.classified_ok)
-        self.assertEqual(spec.lanes[1].quota, "grok")
-        opus = spec.lanes[2]
+        opus = spec.lanes[1]
         self.assertEqual(opus.kind, "claude")
         self.assertEqual(opus.args, ("--model", "claude-opus-5"))
         self.assertEqual(opus.quota, "claude")
-        glm = spec.lanes[3]
+        glm = spec.lanes[2]
         self.assertEqual(
             glm.args, ("--provider", "bigmodel-coding", "--model", "glm-5.3")
         )
         self.assertEqual(glm.quota, "glm")
         self.assertFalse(glm.classified_ok)
+        self.assertEqual(spec.lanes[3].quota, "grok")
         cursor = spec.lanes[4]
         self.assertEqual(cursor.kind, "cursor")
         self.assertEqual(cursor.args, ())
