@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.2.0 - 2026-08-22
+
+### Added
+
+- Bundled `grok_usage.py` helper: the sole credential boundary for Grok,
+  reading the login key from the nested `~/.grok/auth.json` shape and
+  normalizing the Grok billing endpoint to one weekly credits window. A
+  monthly period is an error, never shown as a weekly window.
+- `Gk` segment in the workspace row with the same `!`/`!!`/`~` rules and
+  30-minute cadence as Claude, its own atomic cache, and `Gk n/a` when the
+  helper cannot run. Codex and Claude behavior is unchanged; the segment
+  appears only when a Grok login exists.
+- `route` subcommand with `classes.toml`: session-start model-class routing
+  (first lane with health >= 1 and remaining >= 20, else highest health,
+  `n/a` ranks last), `--explain`, `--launch`, and `--classified`.
+- `route-medium` and `route-explain` plugin actions and a Grok data-source
+  section, routing rule, and kill rule in the README.
+
 ## 2.1.0 - 2026-08-17
 
 ### Added

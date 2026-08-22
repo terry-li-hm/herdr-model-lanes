@@ -2,8 +2,10 @@
 
 Codex is queried through its local app-server. Claude Max usage is obtained
 from the bundled ``claude_max_usage.py`` helper subprocess, which owns OAuth
-and Keychain handling. This plugin sees only normalized usage JSON and never
-credentials.
+and Keychain handling. Grok quota is obtained from the bundled
+``grok_usage.py`` helper subprocess in the same shape. The ``route``
+subcommand picks a model-class lane from the normalized caches at launch
+time. This plugin sees only normalized usage JSON and never credentials.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import sys
 import tempfile
 import threading
 import time
+import tomllib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -30,11 +33,18 @@ CLAUDE_REFRESH_INTERVAL_SECS = 1_800
 CACHE_TTL_SECS = 6 * 3_600
 SUBPROCESS_TIMEOUT_SECS = 15
 CLAUDE_HELPER_TIMEOUT_SECS = 12
+GROK_REFRESH_INTERVAL_SECS = 1_800
+GROK_HELPER_TIMEOUT_SECS = 12
+LAUNCH_TIMEOUT_SECS = 30
 PLUGIN_ID = "terry.herdr-model-quota"
 TOKEN_NAME = "model_quota"
 TOKEN_TTL_MS = 2 * 60 * 60 * 1000
 CODEX_CACHE_FILENAME = "codex-quota.json"
 CLAUDE_CACHE_FILENAME = "claude-quota.json"
+GROK_CACHE_FILENAME = "grok-quota.json"
+CLASSES_FILENAME = "classes.toml"
+ROUTE_WINDOW_SECONDS = 604_800
+UNSET = object()
 NON_SUBSCRIPTION_PLAN_MARKERS = ("api", "payg", "usage", "trial")
 
 
@@ -66,12 +76,20 @@ class ClaudeUsage:
 
 
 @dataclass(frozen=True)
+class GrokUsage:
+    weekly: QuotaWindow
+    fetched_at: int
+
+
+@dataclass(frozen=True)
 class RefreshOutcome:
     codex: CodexUsage | None
     claude: ClaudeUsage | None
     codex_stale: bool
     claude_stale: bool
     errors: tuple[str, ...] = ()
+    grok: GrokUsage | None = None
+    grok_stale: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +163,28 @@ def _parse_timestamp(value: object, field: str) -> int | None:
     return int(parsed.timestamp())
 
 
+def parse_grok_usage(payload: dict, fetched_at: int) -> GrokUsage:
+    """Parse the normalized, credential-free output of the Grok helper."""
+    if not isinstance(payload, dict):
+        raise QuotaError("Grok helper payload is not an object")
+    weekly = _parse_grok_window(payload.get("weekly"), "Grok weekly")
+    if weekly is None:
+        raise QuotaError("Grok helper payload has no weekly window")
+    if weekly.resets_at is None:
+        raise QuotaError("Grok helper weekly window has no reset timestamp")
+    return GrokUsage(weekly=weekly, fetched_at=fetched_at)
+
+
+def _parse_grok_window(value: object, field: str) -> QuotaWindow | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise QuotaError(f"{field} window is not an object")
+    used, remaining = _percent(value.get("used_percent"), f"{field} used percentage")
+    resets_at = _parse_timestamp(value.get("resets_at"), f"{field} resets_at")
+    return QuotaWindow(used, remaining, resets_at)
+
+
 def _parse_claude_window(value: object, field: str) -> QuotaWindow | None:
     if value is None:
         return None
@@ -216,6 +256,8 @@ def format_quota(
     now: int,
     codex_stale: bool = False,
     claude_stale: bool = False,
+    grok: GrokUsage | None | object = UNSET,
+    grok_stale: bool = False,
 ) -> str:
     codex_text = "Cx n/a"
     if codex is not None:
@@ -236,7 +278,14 @@ def format_quota(
         if constraints:
             claude_text += " / " + " / ".join(constraints)
 
-    return f"{codex_text} | {claude_text}"
+    line = f"{codex_text} | {claude_text}"
+    if grok is not UNSET:
+        grok_usage = grok if isinstance(grok, GrokUsage) else None
+        grok_text = "Gk n/a"
+        if grok_usage is not None:
+            grok_text = _format_window("Gk", grok_usage.weekly, now, grok_stale)
+        line += f" | {grok_text}"
+    return line
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +388,24 @@ def load_claude_cache(path: Path) -> ClaudeUsage | None:
 
 def _attempt_path(cache_path: Path) -> Path:
     return cache_path.with_suffix(".attempt.json")
+
+
+def save_grok_cache(path: Path, usage: GrokUsage) -> None:
+    _save_json(
+        path,
+        {"weekly": _window_to_dict(usage.weekly), "fetched_at": usage.fetched_at},
+    )
+
+
+def load_grok_cache(path: Path) -> GrokUsage | None:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        weekly = _window_from_dict(raw["weekly"], "Grok weekly")
+        if weekly is None or weekly.resets_at is None:
+            return None
+        return GrokUsage(weekly, int(raw["fetched_at"]))
+    except (OSError, KeyError, TypeError, ValueError):
+        return None
 
 
 def _load_attempt(path: Path) -> int | None:
@@ -541,6 +608,39 @@ def query_claude(
 # ---------------------------------------------------------------------------
 
 
+def default_grok_command() -> list[str]:
+    """Default Grok helper invocation: current interpreter, bundled module."""
+    return [sys.executable, str(Path(__file__).with_name("grok_usage.py"))]
+
+
+def query_grok(
+    now: int | None = None, grok_command: list[str] | None = None
+) -> GrokUsage:
+    """Obtain normalized Grok usage from the bundled helper subprocess."""
+    if now is None:
+        now = int(time.time())
+    command = grok_command if grok_command is not None else default_grok_command()
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=GROK_HELPER_TIMEOUT_SECS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise QuotaError(
+            f"cannot obtain Grok usage from helper: {type(exc).__name__}"
+        ) from exc
+    if completed.returncode != 0:
+        raise QuotaError(f"Grok helper failed with rc={completed.returncode}")
+    try:
+        payload = json.loads(completed.stdout)
+    except ValueError as exc:
+        raise QuotaError("Grok helper returned invalid JSON") from exc
+    return parse_grok_usage(payload, fetched_at=now)
+
+
 def _herdr(herdr_bin: str, args: list[str]) -> dict:
     completed = subprocess.run(
         [herdr_bin, *args],
@@ -664,6 +764,35 @@ def _refresh_claude(
             return cached, cached is not None, str(exc)
 
 
+def _refresh_grok(
+    force: bool,
+    cache_path: Path,
+    now: int,
+    grok_command: list[str] | None,
+) -> tuple[GrokUsage | None, bool, str | None]:
+    with _cache_lock(cache_path):
+        cached = _discard_expired(cache_path, load_grok_cache(cache_path), now)
+        attempted_at = _load_attempt(_attempt_path(cache_path))
+        freshness = max(
+            cached.fetched_at if cached is not None else 0,
+            attempted_at or 0,
+        )
+        if not force and freshness and now - freshness < GROK_REFRESH_INTERVAL_SECS:
+            failed_after_cache = (
+                cached is not None
+                and attempted_at is not None
+                and attempted_at > cached.fetched_at
+            )
+            return cached, failed_after_cache, None
+        _save_attempt(_attempt_path(cache_path), now)
+        try:
+            usage = query_grok(now=now, grok_command=grok_command)
+            save_grok_cache(cache_path, usage)
+            return usage, False, None
+        except QuotaError as exc:
+            return cached, cached is not None, str(exc)
+
+
 def refresh(
     force: bool = False,
     state_dir: Path | None = None,
@@ -671,6 +800,8 @@ def refresh(
     herdr_bin: str = "herdr",
     codex_bin: str = "codex",
     claude_command: list[str] | None = None,
+    grok_command: list[str] | None = None,
+    include_grok: bool = False,
 ) -> RefreshOutcome:
     if now is None:
         now = int(time.time())
@@ -688,18 +819,305 @@ def refresh(
     claude, claude_stale, claude_error = _refresh_claude(
         force, state_dir / CLAUDE_CACHE_FILENAME, now, claude_command
     )
-    line = format_quota(codex, claude, now, codex_stale, claude_stale)
+    grok: GrokUsage | None = None
+    grok_stale = False
+    grok_error: str | None = None
+    if include_grok:
+        grok, grok_stale, grok_error = _refresh_grok(
+            force, state_dir / GROK_CACHE_FILENAME, now, grok_command
+        )
+    line = format_quota(
+        codex,
+        claude,
+        now,
+        codex_stale,
+        claude_stale,
+        grok if include_grok else UNSET,
+        grok_stale,
+    )
     publish_to_focused_workspace(line, herdr_bin=herdr_bin)
     print(line, flush=True)
-    errors = tuple(error for error in (codex_error, claude_error) if error)
-    return RefreshOutcome(codex, claude, codex_stale, claude_stale, errors)
+    errors = tuple(error for error in (codex_error, claude_error, grok_error) if error)
+    return RefreshOutcome(
+        codex, claude, codex_stale, claude_stale, errors, grok, grok_stale
+    )
+
+
+# ---------------------------------------------------------------------------
+# Model-class routing
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class LaneSpec:
+    name: str
+    kind: str
+    args: tuple[str, ...]
+    quota: str
+    classified_ok: bool
+
+
+@dataclass(frozen=True)
+class ClassSpec:
+    name: str
+    description: str
+    lanes: tuple[LaneSpec, ...]
+
+
+def load_class_spec(name: str, path: Path | None = None) -> ClassSpec:
+    """Load one model class from ``classes.toml`` beside the manifest."""
+    if path is None:
+        path = Path(__file__).with_name(CLASSES_FILENAME)
+    try:
+        document = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise QuotaError(
+            f"cannot read {CLASSES_FILENAME}: {type(exc).__name__}"
+        ) from exc
+    classes = document.get("classes")
+    entry = classes.get(name) if isinstance(classes, dict) else None
+    if not isinstance(entry, dict):
+        raise QuotaError(f"unknown model class: {name!r}")
+    lanes = []
+    for lane in entry.get("lanes", []):
+        lanes.append(
+            LaneSpec(
+                name=str(lane["name"]),
+                kind=str(lane["kind"]),
+                args=tuple(str(arg) for arg in lane.get("args", [])),
+                quota=str(lane["quota"]),
+                classified_ok=lane.get("classified_ok", False) is True,
+            )
+        )
+    if not lanes:
+        raise QuotaError(f"model class {name!r} has no lanes")
+    return ClassSpec(
+        name=name,
+        description=str(entry.get("description", "")),
+        lanes=tuple(lanes),
+    )
+
+
+def _lane_health(window: QuotaWindow | None, now: int) -> float | None:
+    """quota_left / time_left; ``None`` ranks the lane last."""
+    if window is None or window.resets_at is None:
+        return None
+    time_left = max((window.resets_at - now) / ROUTE_WINDOW_SECONDS, 1e-9)
+    quota_left = max(0, min(100, window.remaining_percent)) / 100
+    return quota_left / time_left
+
+
+def select_lane(
+    class_spec: ClassSpec,
+    quotas: dict[str, QuotaWindow | None],
+    now: int,
+    classified: bool = False,
+) -> tuple[LaneSpec, list[str]]:
+    """Pick a lane from remaining quota; pure, unit-tested."""
+    lanes = [lane for lane in class_spec.lanes if not classified or lane.classified_ok]
+    if not lanes:
+        raise QuotaError(f"model class {class_spec.name!r} has no eligible lanes")
+
+    rationale: list[str] = []
+    for lane in lanes:
+        window = quotas.get(lane.quota)
+        health = _lane_health(window, now)
+        if health is None:
+            rationale.append(f"{lane.name}: n/a ({lane.quota} quota unavailable)")
+            continue
+        remaining = max(0, min(100, window.remaining_percent))
+        eta = _countdown(window.resets_at, now)
+        rationale.append(
+            f"{lane.name}: {remaining}% left, resets in {eta}, health {health:.2f}"
+        )
+
+    eligible = [
+        (index, lane)
+        for index, lane in enumerate(lanes)
+        if (health := _lane_health(quotas.get(lane.quota), now)) is not None
+        and health >= 1
+        and max(0, min(100, quotas[lane.quota].remaining_percent)) >= 20
+    ]
+    if eligible:
+        pick = eligible[0][1]
+        reason = "first lane in order with health >= 1 and remaining >= 20"
+    else:
+        available = [
+            (index, lane)
+            for index, lane in enumerate(lanes)
+            if _lane_health(quotas.get(lane.quota), now) is not None
+        ]
+        if available:
+            pick = min(
+                available,
+                key=lambda item: (
+                    -_lane_health(quotas[item[1].quota], now),
+                    item[0],
+                ),
+            )[1]
+            reason = "highest health; no lane reached health >= 1 with remaining >= 20"
+        else:
+            pick = lanes[0]
+            reason = "no lane has quota data; first lane by order"
+    rationale.append(f"pick: {pick.name} ({reason})")
+    return pick, rationale
+
+
+def _run_herdr_command(
+    herdr_bin: str, args: list[str], what: str
+) -> subprocess.CompletedProcess:
+    try:
+        completed = subprocess.run(
+            [herdr_bin, *args],
+            capture_output=True,
+            text=True,
+            timeout=LAUNCH_TIMEOUT_SECS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise QuotaError(f"{what} failed: {type(exc).__name__}") from exc
+    if completed.returncode != 0:
+        raise QuotaError(f"{what} failed with rc={completed.returncode}")
+    return completed
+
+
+def _launch(herdr_bin: str, class_spec: ClassSpec, lane: LaneSpec, line: str) -> None:
+    """Create the tab, echo the rationale, and start the agent once."""
+    pane_id = os.environ.get("HERDR_PANE_ID", "")
+    cwd = os.environ.get("HOME", "/tmp")
+    if pane_id:
+        completed = _run_herdr_command(
+            herdr_bin, ["pane", "get", pane_id], "herdr pane get"
+        )
+        try:
+            document = json.loads(completed.stdout or "{}")
+            pane_cwd = (document.get("result") or document).get("cwd")
+            if isinstance(pane_cwd, str) and pane_cwd:
+                cwd = pane_cwd
+        except ValueError:
+            pass
+
+    workspace_id = os.environ.get("HERDR_WORKSPACE_ID", "")
+    if not workspace_id:
+        raise QuotaError("launch requires HERDR_WORKSPACE_ID")
+    completed = _run_herdr_command(
+        herdr_bin,
+        [
+            "tab",
+            "create",
+            "--workspace",
+            workspace_id,
+            "--cwd",
+            cwd,
+            "--label",
+            f"{class_spec.name}: {lane.name}",
+        ],
+        "herdr tab create",
+    )
+    try:
+        document = json.loads(completed.stdout or "{}")
+    except ValueError as exc:
+        raise QuotaError("herdr tab create returned invalid JSON") from exc
+    result = document.get("result") or document
+    new_pane = result.get("pane_id") or result.get("paneId") or result.get("id")
+    tabnum = result.get("tab_number") or result.get("number") or result.get("tab_id")
+    if not isinstance(new_pane, str) or not new_pane:
+        raise QuotaError("herdr tab create returned no pane id")
+
+    _run_herdr_command(
+        herdr_bin,
+        [
+            "pane",
+            "send",
+            new_pane,
+            "--",
+            "printf",
+            "%s\\n",
+            line,
+        ],
+        "herdr pane send",
+    )
+    _run_herdr_command(
+        herdr_bin,
+        [
+            "agent",
+            "start",
+            f"{class_spec.name}-{lane.name}-{tabnum}",
+            "--kind",
+            lane.kind,
+            "--pane",
+            new_pane,
+            "--",
+            *lane.args,
+        ],
+        "herdr agent start",
+    )
+
+
+def route_command(
+    argv: list[str],
+    herdr_bin: str = "herdr",
+    now: int | None = None,
+) -> int:
+    """``route <class> [--explain] [--launch] [--classified]``."""
+    if not argv:
+        print(
+            "usage: route <class> [--explain] [--launch] [--classified]",
+            file=sys.stderr,
+        )
+        return 2
+    class_name = argv[0]
+    explain = "--explain" in argv or "--launch" not in argv
+    launch = "--launch" in argv
+    classified = "--classified" in argv
+    if now is None:
+        now = int(time.time())
+
+    class_spec = load_class_spec(class_name)
+    state_value = os.environ.get("HERDR_PLUGIN_STATE_DIR")
+    state_dir = Path(state_value) if state_value else None
+    outcome = refresh(
+        state_dir=state_dir, now=now, herdr_bin=herdr_bin, include_grok=True
+    )
+    quotas: dict[str, QuotaWindow | None] = {
+        "codex": outcome.codex.weekly if outcome.codex else None,
+        "claude": outcome.claude.weekly if outcome.claude else None,
+        "grok": outcome.grok.weekly if outcome.grok else None,
+    }
+    lane, rationale = select_lane(class_spec, quotas, now, classified=classified)
+    for line in rationale:
+        print(line)
+    pick_line = rationale[-1]
+
+    if explain:
+        _run_herdr_command(
+            herdr_bin,
+            [
+                "notification",
+                "show",
+                f"Route: {class_name}",
+                "--body",
+                pick_line,
+            ],
+            "herdr notification show",
+        )
+    if launch:
+        _launch(herdr_bin, class_spec, lane, pick_line)
+    return 0
 
 
 def main(argv: list[str]) -> int:
     if argv and argv[0] == "clear":
         clear_all()
         return 0
-    refresh(force="--force" in argv)
+    if argv and argv[0] == "route":
+        try:
+            return route_command(argv[1:])
+        except QuotaError as exc:
+            print(f"route error: {exc}", file=sys.stderr)
+            return 1
+    include_grok = Path.home().joinpath(".grok", "auth.json").exists()
+    refresh(force="--force" in argv, include_grok=include_grok)
     return 0
 
 

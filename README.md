@@ -37,6 +37,18 @@ No OAuth token or Keychain value is ever placed in argv, logs, caches, error
 messages, or files. Where the helper cannot run (Linux, a locked Keychain, or
 a signed-out session), Claude displays as `Cl n/a` while Codex keeps working.
 
+Grok quota comes from the bundled `grok_usage.py` helper in the same shape.
+It is the sole credential boundary for Grok: it reads the login key from the
+nested `~/.grok/auth.json` shape (top-level auth-host keys; only the `key`
+field of the first entry) and calls
+`https://cli-chat-proxy.grok.com/v1/billing?format=credits`, printing only the
+normalized weekly credits window from `config.creditUsagePercent` and
+`config.currentPeriod.end`. A monthly period is an error, never a weekly
+window. The key never appears in argv, logs, caches, or errors. The `Gk`
+segment uses the same `!`/`!!`/`~` rules and 30-minute cadence as Claude with
+its own atomic cache, shows `Gk n/a` when the helper cannot run, and appears
+only when a Grok login exists on the machine.
+
 ## Refresh, caching, and failure behavior
 
 Codex refreshes at most every five minutes. Claude refreshes at most every 30
@@ -74,15 +86,33 @@ rows = [
 ]
 ```
 
+## Model-class routing
+
+`route <class>` picks a lane for a new agent tab from the normalized caches
+(refreshing them first if stale). Lanes are defined in `classes.toml` beside
+the manifest; `medium` is Sol on the Codex subscription with Grok 4.6 on
+SuperGrok as the fallback. For each lane it computes
+`health = (remaining/100) / ((resets_at - now) / window_seconds)` and picks
+the first lane in order with `health >= 1` and `remaining >= 20`; otherwise
+the lane with the highest health; a lane whose quota is `n/a` ranks last;
+ties keep order. `--explain` prints one line per lane plus the pick and shows
+it as a Herdr notification; `--launch` additionally creates the tab, echoes
+the rationale line into the new pane, and starts the agent. Routing happens
+once at launch; nothing re-routes a running pane.
+
+Kill rule: if Herdr's plugin action log shows no `route` invocation in the
+two weeks after landing, delete the route action.
+
 ## Installation
 
 Requirements: Python 3.11+, Herdr 0.8+, and `codex` on `PATH`. Claude support
-additionally requires macOS with the Claude Code CLI signed in.
+additionally requires macOS with the Claude Code CLI signed in. Grok support
+additionally requires a Grok CLI login under `~/.grok`.
 
 Install the pinned release from GitHub:
 
 ```bash
-herdr plugin install terry-li-hm/herdr-model-quota --ref v2.1.0
+herdr plugin install terry-li-hm/herdr-model-quota --ref v2.2.0
 ```
 
 Then add the sidebar configuration above, run `herdr server reload-config`, and
@@ -106,7 +136,7 @@ credentials; deleting that directory removes every trace.
 - The Anthropic usage endpoint is unofficial and may break at any time; Claude
   numbers are best-effort and experimental.
 - Claude usage requires macOS because the token lives in the macOS Keychain.
-- Codex and Claude are the only supported providers, and only subscription
-  (non-API-key) plans are reported.
+- Codex, Claude, and Grok are the only supported providers, and only
+  subscription (non-API-key) plans are reported.
 
 See `SECURITY.md` for the trust model and reporting channels.

@@ -1,0 +1,9 @@
+{
+  "config": {
+    "creditUsagePercent": 42.5,
+    "currentPeriod": {
+      "type": "USAGE_PERIOD_TYPE_MONTHLY",
+      "end": "2026-09-15T00:00:00Z"
+    }
+  }
+}

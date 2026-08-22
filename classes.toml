@@ -1,0 +1,16 @@
+[classes.medium]
+description = "Sol on the Codex subscription, else Grok 4.6 on SuperGrok"
+
+[[classes.medium.lanes]]
+name = "sol"
+kind = "pi"
+args = ["--provider", "openai-codex", "--model", "gpt-5.6-sol"]
+quota = "codex"
+classified_ok = true
+
+[[classes.medium.lanes]]
+name = "grok"
+kind = "grok"
+args = []
+quota = "grok"
+classified_ok = true
