@@ -10,3 +10,4 @@ __pycache__/
 *.attempt.json
 codex-quota.json
 claude-quota.json
+.pane
