@@ -1,5 +1,16 @@
 # Changelog
 
+## 3.7.0 - 2026-08-22
+
+### Added
+
+- Cursor quota reader: the bundled `cursor_usage.py` helper is the sole
+  credential boundary. It reads a still-fresh `cursorAuth/accessToken` from
+  Cursor.app's local `state.vscdb`, calls `GET https://cursor.com/api/usage-summary`
+  with a `WorkosCursorSessionToken=::<jwt>` cookie, and prints only the
+  monthly plan window. The refresh token is never read. The existing `cursor`
+  lane now ranks by remaining quota instead of always `n/a`.
+
 ## 3.6.0 - 2026-08-22
 
 ### Changed

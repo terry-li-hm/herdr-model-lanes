@@ -93,6 +93,16 @@ the CLI refresh token, and the key never appears in argv, logs, caches, or
 errors. The `Km` segment uses the same `!`/`!!`/`~` rules and a five-minute
 cadence because a five-hour window can be the routing meter.
 
+Cursor quota comes from the bundled `cursor_usage.py` helper in the same
+shape. It is the sole credential boundary for Cursor: it reads
+`cursorAuth/accessToken` from Cursor.app's local VS Code-style
+`state.vscdb` (macOS Application Support, or `~/.config/Cursor` on Linux),
+refuses a JWT with under 60 seconds left, and calls
+`GET https://cursor.com/api/usage-summary` with cookie
+`WorkosCursorSessionToken=::<token>`. The refresh token is never read. The
+`Cu` segment uses the same `!`/`!!`/`~` rules and a 30-minute cadence, and
+the router judges the monthly billing-cycle window on its own length.
+
 ## Refresh, caching, and failure behavior
 
 Codex refreshes at most every five minutes. Claude refreshes at most every 30
@@ -147,9 +157,9 @@ the manifest. Two classes exist:
   and vendor cards (Opus 5 42.7 vs Grok 4.6 26.5; GLM-5.3 28–32); Fable and
   Opus share the one Claude Max window, so the health gate, not order,
   protects `high`: Opus is picked only while Claude is on pace and above
-  20%. `agy` and `kimi` are in the picker so unused Google and Kimi Code
-  quota can be spent by confirmation or number override even when an earlier
-  lane is healthy.
+  20%. `agy`, `kimi`, and `cursor` are in the picker so unused Google, Kimi
+  Code, and Cursor quota can be spent by confirmation or number override
+  even when an earlier lane is healthy.
 
 For each lane the router computes
 `health = (remaining/100) / ((resets_at - now) / window_seconds)` and picks:
@@ -162,9 +172,8 @@ For each lane the router computes
    order");
 3. otherwise the lane with the highest health ("least unhealthy lane").
 
-A lane whose quota has no reader (`cursor`) is `n/a` and ranks last,
-so Cursor is the last resort and never chosen while any other lane is
-healthy. `--explain` prints one line per lane plus the pick and shows it as
+A lane whose quota has no reader is `n/a` and ranks last. `--explain` prints
+one line per lane plus the pick and shows it as
 a Herdr notification (non-fatal without Herdr); `--launch` additionally
 creates the tab, echoes the rationale line into the new pane, and starts
 the agent; `--argv` prints the chosen lane's shell-quoted command on stdout
@@ -207,6 +216,7 @@ additionally requires a Z.ai/BigModel API key from one of the sources above.
 Antigravity support additionally requires Antigravity.app or `agy` already
 running so the loopback quota server can be probed. Kimi Code support
 additionally requires `KIMI_CODE_API_KEY` or a signed-in Kimi Code CLI.
+Cursor support additionally requires a signed-in Cursor.app session.
 
 Install the pinned release from GitHub:
 
@@ -235,11 +245,11 @@ credentials; deleting that directory removes every trace.
 - The Anthropic usage endpoint is unofficial and may break at any time; Claude
   numbers are best-effort and experimental.
 - Claude usage requires macOS because the token lives in the macOS Keychain.
-- Codex, Claude, Grok, GLM, Antigravity, and Kimi Code are the supported
-  quota providers. The Cursor lane still has no reader, so it routes as
-  `n/a` until one lands. Antigravity quota is available only while
+- Codex, Claude, Grok, GLM, Antigravity, Kimi Code, and Cursor are the
+  supported quota providers. Antigravity quota is available only while
   Antigravity.app or `agy` is already running. Kimi Code uses the coding
-  membership API, not Moonshot Open Platform balance.
+  membership API, not Moonshot Open Platform balance. Cursor uses the
+  local Cursor.app session, not `CURSOR_API_KEY`.
 
 See `SECURITY.md` for the trust model and reporting channels.
 

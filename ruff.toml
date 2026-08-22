@@ -6,6 +6,7 @@ target-version = "py311"
 known-first-party = [
     "antigravity_usage",
     "claude_max_usage",
+    "cursor_usage",
     "glm_usage",
     "grok_usage",
     "kimi_usage",

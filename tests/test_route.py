@@ -677,6 +677,95 @@ class KimiTests(unittest.TestCase):
         self.assertIn("Km n/a", publish.call_args.args[0])
 
 
+class CursorTests(unittest.TestCase):
+    def test_parse_cursor_usage_from_helper_shape(self) -> None:
+        payload = {
+            "monthly": {
+                "used_percent": 1,
+                "remaining_percent": 99,
+                "resets_at": "2026-09-19T06:05:05Z",
+                "window_seconds": 2_678_400,
+            }
+        }
+
+        usage = quota.parse_cursor_usage(payload, fetched_at=NOW)
+
+        self.assertEqual(usage.monthly.remaining_percent, 99)
+        self.assertEqual(usage.monthly.window_seconds, 2_678_400)
+
+    def test_rejects_missing_monthly_window(self) -> None:
+        with self.assertRaisesRegex(quota.QuotaError, "monthly"):
+            quota.parse_cursor_usage({"monthly": None}, fetched_at=NOW)
+
+    def test_formats_cu_segment_after_km(self) -> None:
+        cursor = quota.CursorUsage(window(99, WEEK), NOW)
+
+        self.assertEqual(
+            quota.format_quota(
+                None,
+                None,
+                NOW,
+                grok=None,
+                glm=None,
+                antigravity=None,
+                kimi=None,
+                cursor=cursor,
+            ),
+            "Cx n/a | Cl n/a | Gk n/a | Gl n/a | Ag n/a | Km n/a | Cu 99% · 7d0h",
+        )
+
+    def test_cu_na_when_app_signed_out(self) -> None:
+        self.assertEqual(
+            quota.format_quota(None, None, NOW, cursor=None),
+            "Cx n/a | Cl n/a | Cu n/a",
+        )
+
+    def test_cursor_cache_round_trip(self) -> None:
+        usage = quota.CursorUsage(window(99, WEEK), NOW)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / quota.CURSOR_CACHE_FILENAME
+            quota.save_cursor_cache(path, usage)
+
+            self.assertEqual(quota.load_cursor_cache(path), usage)
+            self.assertEqual(
+                set(json.loads(path.read_text())), {"monthly", "fetched_at"}
+            )
+
+    def test_route_picks_cursor_when_it_is_the_only_healthy_lane(self) -> None:
+        spec = medium_spec()
+        quotas = {
+            "codex": window(5, WEEK),
+            "grok": window(5, WEEK),
+            "claude": window(5, WEEK),
+            "glm": window(5, WEEK),
+            "antigravity": window(5, WEEK),
+            "kimi": window(5, WEEK),
+            "cursor": window(99, WEEK),
+        }
+
+        lane, lines = quota.select_lane(spec, quotas, NOW)
+
+        self.assertEqual(lane.name, "cursor")
+        self.assertIn("pick: cursor", lines[-1])
+
+    @mock.patch("herdr_model_lanes.query_cursor")
+    def test_cursor_refreshes_on_thirty_minute_cadence(
+        self, query_cursor: mock.Mock
+    ) -> None:
+        cached = quota.CursorUsage(window(99, WEEK), NOW - 1_000)
+        query_cursor.return_value = quota.CursorUsage(window(90, WEEK), NOW)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / quota.CURSOR_CACHE_FILENAME
+            quota.save_cursor_cache(path, cached)
+            within = quota._refresh_cursor(False, path, NOW - 1_000 + 1_500, None)
+            outside = quota._refresh_cursor(False, path, NOW - 1_000 + 1_801, None)
+
+        self.assertEqual(within[0], cached)
+        self.assertEqual(outside[0].monthly.remaining_percent, 90)
+        query_cursor.assert_called_once()
+
+
 class RouteCommandTests(unittest.TestCase):
     @mock.patch("herdr_model_lanes._run_herdr_command")
     @mock.patch("herdr_model_lanes.refresh")
@@ -980,7 +1069,7 @@ class SelectLanePropertyTests(unittest.TestCase):
                 ("glm", quota.GLM_WINDOW_SECONDS),
                 ("antigravity", WEEK),
                 ("kimi", WEEK),
-                ("cursor", WEEK),
+                ("cursor", 31 * 86_400),
             ):
                 roll = rng.randrange(5)
                 if roll == 0:

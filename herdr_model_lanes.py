@@ -29,6 +29,7 @@ from datetime import datetime
 from pathlib import Path
 
 import antigravity_usage
+import cursor_usage
 import glm_usage
 import kimi_usage
 
@@ -48,6 +49,8 @@ ANTIGRAVITY_REFRESH_INTERVAL_SECS = 1_800
 ANTIGRAVITY_HELPER_TIMEOUT_SECS = 12
 KIMI_REFRESH_INTERVAL_SECS = 300
 KIMI_HELPER_TIMEOUT_SECS = 12
+CURSOR_REFRESH_INTERVAL_SECS = 1_800
+CURSOR_HELPER_TIMEOUT_SECS = 12
 LAUNCH_TIMEOUT_SECS = 30
 PLUGIN_ID = "terry.herdr-model-lanes"
 TOKEN_NAME = "model_quota"
@@ -58,6 +61,7 @@ GROK_CACHE_FILENAME = "grok-quota.json"
 GLM_CACHE_FILENAME = "glm-quota.json"
 ANTIGRAVITY_CACHE_FILENAME = "antigravity-quota.json"
 KIMI_CACHE_FILENAME = "kimi-quota.json"
+CURSOR_CACHE_FILENAME = "cursor-quota.json"
 CLASSES_FILENAME = "classes.toml"
 ROUTE_WINDOW_SECONDS = 604_800
 SURPLUS_HEALTH = 2.0
@@ -129,6 +133,12 @@ class KimiUsage:
 
 
 @dataclass(frozen=True)
+class CursorUsage:
+    monthly: QuotaWindow
+    fetched_at: int
+
+
+@dataclass(frozen=True)
 class RefreshOutcome:
     codex: CodexUsage | None
     claude: ClaudeUsage | None
@@ -143,6 +153,8 @@ class RefreshOutcome:
     antigravity_stale: bool = False
     kimi: KimiUsage | None = None
     kimi_stale: bool = False
+    cursor: CursorUsage | None = None
+    cursor_stale: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +320,18 @@ def parse_kimi_usage(payload: dict, fetched_at: int) -> KimiUsage:
     return KimiUsage(coding=coding, fetched_at=fetched_at)
 
 
+def parse_cursor_usage(payload: dict, fetched_at: int) -> CursorUsage:
+    """Parse the normalized, credential-free output of the Cursor helper."""
+    if not isinstance(payload, dict):
+        raise QuotaError("Cursor helper payload is not an object")
+    monthly = _parse_antigravity_window(payload.get("monthly"), "Cursor monthly")
+    if monthly is None:
+        raise QuotaError("Cursor helper payload has no monthly window")
+    if monthly.resets_at is None:
+        raise QuotaError("Cursor helper monthly window has no reset timestamp")
+    return CursorUsage(monthly=monthly, fetched_at=fetched_at)
+
+
 def _parse_claude_window(value: object, field: str) -> QuotaWindow | None:
     if value is None:
         return None
@@ -391,6 +415,8 @@ def format_quota(
     antigravity_stale: bool = False,
     kimi: KimiUsage | None | object = UNSET,
     kimi_stale: bool = False,
+    cursor: CursorUsage | None | object = UNSET,
+    cursor_stale: bool = False,
 ) -> str:
     codex_text = "Cx n/a"
     if codex is not None:
@@ -440,6 +466,14 @@ def format_quota(
         if kimi_usage_obj is not None:
             kimi_text = _format_window("Km", kimi_usage_obj.coding, now, kimi_stale)
         line += f" | {kimi_text}"
+    if cursor is not UNSET:
+        cursor_usage_obj = cursor if isinstance(cursor, CursorUsage) else None
+        cursor_text = "Cu n/a"
+        if cursor_usage_obj is not None:
+            cursor_text = _format_window(
+                "Cu", cursor_usage_obj.monthly, now, cursor_stale
+            )
+        line += f" | {cursor_text}"
     return line
 
 
@@ -633,6 +667,34 @@ def load_kimi_cache(path: Path) -> KimiUsage | None:
         if not 0 <= used <= 100 or not 0 <= remaining <= 100 or window_seconds <= 0:
             return None
         return KimiUsage(
+            QuotaWindow(used, remaining, int(resets_raw), window_seconds),
+            int(raw["fetched_at"]),
+        )
+    except (OSError, KeyError, TypeError, ValueError, QuotaError):
+        return None
+
+
+def save_cursor_cache(path: Path, usage: CursorUsage) -> None:
+    payload = _window_to_dict(usage.monthly) or {}
+    payload["window_seconds"] = usage.monthly.window_seconds
+    _save_json(path, {"monthly": payload, "fetched_at": usage.fetched_at})
+
+
+def load_cursor_cache(path: Path) -> CursorUsage | None:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        monthly_raw = raw["monthly"]
+        if not isinstance(monthly_raw, dict):
+            return None
+        used = int(monthly_raw["used_percent"])
+        remaining = int(monthly_raw["remaining_percent"])
+        resets_raw = monthly_raw.get("resets_at")
+        if resets_raw is None:
+            return None
+        window_seconds = int(monthly_raw.get("window_seconds", ROUTE_WINDOW_SECONDS))
+        if not 0 <= used <= 100 or not 0 <= remaining <= 100 or window_seconds <= 0:
+            return None
+        return CursorUsage(
             QuotaWindow(used, remaining, int(resets_raw), window_seconds),
             int(raw["fetched_at"]),
         )
@@ -972,6 +1034,39 @@ def query_kimi(now: int | None = None, kimi_command: list[str] | None = None) ->
     return parse_kimi_usage(payload, fetched_at=now)
 
 
+def default_cursor_command() -> list[str]:
+    """Default Cursor helper invocation: current interpreter, bundled module."""
+    return [sys.executable, str(Path(__file__).with_name("cursor_usage.py"))]
+
+
+def query_cursor(
+    now: int | None = None, cursor_command: list[str] | None = None
+) -> CursorUsage:
+    """Obtain normalized Cursor usage from the bundled helper subprocess."""
+    if now is None:
+        now = int(time.time())
+    command = cursor_command if cursor_command is not None else default_cursor_command()
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=CURSOR_HELPER_TIMEOUT_SECS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise QuotaError(
+            f"cannot obtain Cursor usage from helper: {type(exc).__name__}"
+        ) from exc
+    if completed.returncode != 0:
+        raise QuotaError(f"Cursor helper failed with rc={completed.returncode}")
+    try:
+        payload = json.loads(completed.stdout)
+    except ValueError as exc:
+        raise QuotaError("Cursor helper returned invalid JSON") from exc
+    return parse_cursor_usage(payload, fetched_at=now)
+
+
 def _herdr(herdr_bin: str, args: list[str]) -> dict:
     command = args[1] if len(args) > 1 else args[0]
     try:
@@ -1218,6 +1313,35 @@ def _refresh_kimi(
             return cached, cached is not None, str(exc)
 
 
+def _refresh_cursor(
+    force: bool,
+    cache_path: Path,
+    now: int,
+    cursor_command: list[str] | None,
+) -> tuple[CursorUsage | None, bool, str | None]:
+    with _cache_lock(cache_path):
+        cached = _discard_expired(cache_path, load_cursor_cache(cache_path), now)
+        attempted_at = _load_attempt(_attempt_path(cache_path))
+        freshness = max(
+            cached.fetched_at if cached is not None else 0,
+            attempted_at or 0,
+        )
+        if not force and freshness and now - freshness < CURSOR_REFRESH_INTERVAL_SECS:
+            failed_after_cache = (
+                cached is not None
+                and attempted_at is not None
+                and attempted_at > cached.fetched_at
+            )
+            return cached, failed_after_cache, None
+        _save_attempt(_attempt_path(cache_path), now)
+        try:
+            usage = query_cursor(now=now, cursor_command=cursor_command)
+            save_cursor_cache(cache_path, usage)
+            return usage, False, None
+        except QuotaError as exc:
+            return cached, cached is not None, str(exc)
+
+
 def state_dir_from_env() -> Path | None:
     """Resolve the cache directory: Herdr's variable first, then the standalone one."""
     for name in ("HERDR_PLUGIN_STATE_DIR", "MODEL_LANES_STATE_DIR"):
@@ -1242,6 +1366,8 @@ def refresh(
     include_antigravity: bool = False,
     kimi_command: list[str] | None = None,
     include_kimi: bool = False,
+    cursor_command: list[str] | None = None,
+    include_cursor: bool = False,
     emit: bool = True,
 ) -> RefreshOutcome:
     if now is None:
@@ -1290,6 +1416,13 @@ def refresh(
         kimi, kimi_stale, kimi_error = _refresh_kimi(
             force, state_dir / KIMI_CACHE_FILENAME, now, kimi_command
         )
+    cursor: CursorUsage | None = None
+    cursor_stale = False
+    cursor_error: str | None = None
+    if include_cursor:
+        cursor, cursor_stale, cursor_error = _refresh_cursor(
+            force, state_dir / CURSOR_CACHE_FILENAME, now, cursor_command
+        )
     line = format_quota(
         codex,
         claude,
@@ -1304,6 +1437,8 @@ def refresh(
         antigravity_stale,
         kimi if include_kimi else UNSET,
         kimi_stale,
+        cursor if include_cursor else UNSET,
+        cursor_stale,
     )
     try:
         publish_to_focused_workspace(line, herdr_bin=herdr_bin)
@@ -1319,6 +1454,7 @@ def refresh(
             glm_error,
             antigravity_error,
             kimi_error,
+            cursor_error,
         )
         if error
     )
@@ -1336,6 +1472,8 @@ def refresh(
         antigravity_stale,
         kimi,
         kimi_stale,
+        cursor,
+        cursor_stale,
     )
 
 
@@ -1728,6 +1866,7 @@ def resolve_route(
         include_glm=True,
         include_antigravity=True,
         include_kimi=True,
+        include_cursor=True,
         emit=emit,
     )
     quotas: dict[str, QuotaWindow | None] = {
@@ -1737,6 +1876,7 @@ def resolve_route(
         "glm": outcome.glm.five_hour if outcome.glm else None,
         "antigravity": outcome.antigravity.gemini if outcome.antigravity else None,
         "kimi": outcome.kimi.coding if outcome.kimi else None,
+        "cursor": outcome.cursor.monthly if outcome.cursor else None,
     }
     lane, rationale = select_lane(class_spec, quotas, now, classified=classified)
     if lane_override:
@@ -1941,6 +2081,7 @@ def _cmd_refresh(force: bool) -> int:
         include_glm=glm_usage.key_available(),
         include_antigravity=antigravity_usage.probe_available(),
         include_kimi=kimi_usage.key_available(),
+        include_cursor=cursor_usage.key_available(),
     )
     return 0
 

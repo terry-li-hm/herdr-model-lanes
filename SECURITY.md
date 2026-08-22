@@ -46,9 +46,12 @@ and uses only the Python 3.11+ standard library. Network calls are limited
 to the local Codex app-server, the Anthropic usage endpoint (Claude helper),
 the Grok billing endpoint (Grok helper), the Z.ai/BigModel quota endpoint
 (GLM helper), loopback `127.0.0.1` Connect RPC (Antigravity helper), and
-`https://api.kimi.com/coding/v1/usages` (Kimi Code helper). The Kimi helper
+`https://api.kimi.com/coding/v1/usages` (Kimi Code helper), and
+`https://cursor.com/api/usage-summary` (Cursor helper). The Kimi helper
 sends the key only as `Authorization: Bearer` and refuses redirects. It
-never reads the CLI refresh token.
+never reads the CLI refresh token. The Cursor helper reads the access token
+from Cursor.app's local SQLite state database and sends it only as a
+`WorkosCursorSessionToken` cookie; it never reads the refresh token.
 The Antigravity helper reads a CSRF token from a same-user process listing
 and sends it only as `X-Codeium-Csrf-Token` to loopback; it never logs or
 caches that token, and it refuses redirects and non-loopback hosts. Self-signed
