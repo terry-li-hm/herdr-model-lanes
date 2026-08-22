@@ -1,18 +1,20 @@
 """Herdr plugin: show subscription capacity and route model-class lanes.
 
-Codex is queried through its local app-server. Claude Max, Grok, GLM, and
-Antigravity usage each come from a bundled helper subprocess that is the
-sole credential boundary for that provider. The ``route`` subcommand picks
-a model-class lane from the normalized caches at launch time. This plugin
-sees only normalized usage JSON and never credentials.
+Codex is queried through its local app-server. Claude Max, Grok, GLM,
+Antigravity, and Kimi Code usage each come from a bundled helper subprocess
+that is the sole credential boundary for that provider. The argparse CLI
+exposes ``refresh``, ``clear``, ``route``, and ``ag``. This plugin sees
+only normalized usage JSON and never credentials.
 """
 
 from __future__ import annotations
 
+import argparse
 import fcntl
 import json
 import os
 import queue
+import select
 import shlex
 import subprocess
 import sys
@@ -1589,44 +1591,144 @@ def _notify_route(herdr_bin: str, class_name: str, pick_line: str) -> None:
         print(f"notification skipped: {exc}", file=sys.stderr)
 
 
-def route_command(
-    argv: list[str],
+def _route_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="route",
+        description="Pick a model-class lane from remaining subscription quota.",
+        add_help=add_help,
+    )
+    parser.add_argument(
+        "class_name",
+        metavar="CLASS",
+        help="Model class, such as medium or high",
+    )
+    parser.add_argument(
+        "--explain",
+        action="store_true",
+        help="Print one line per lane plus the pick (default unless --launch or --argv)",
+    )
+    parser.add_argument(
+        "--launch",
+        action="store_true",
+        help="Create a Herdr tab and start the chosen agent",
+    )
+    parser.add_argument(
+        "--argv",
+        action="store_true",
+        dest="argv_mode",
+        help="Print the chosen command on stdout and the rationale on stderr",
+    )
+    parser.add_argument(
+        "--classified",
+        action="store_true",
+        help="Hide lanes that are not classified-ok",
+    )
+    parser.add_argument("--lane", metavar="NAME", help="Override the pick with this lane")
+    return parser
+
+
+def _ag_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="ag",
+        description=(
+            "Show each lane's quota, mark the suggestion, and exec the chosen "
+            "agent in this shell. Enter accepts the star, a number starts that "
+            "lane, q quits."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  ag\n"
+            "  ag high\n"
+            "  ag --classified\n"
+            "  ag medium -y\n"
+            "\n"
+            "Environment: AG_YES=1 skips the prompt; AG_TIMEOUT seconds until "
+            "auto-accept (default 10)."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        add_help=add_help,
+    )
+    parser.add_argument(
+        "class_name",
+        metavar="CLASS",
+        nargs="?",
+        default="medium",
+        help="Model class (default: medium)",
+    )
+    parser.add_argument(
+        "--explain",
+        action="store_true",
+        help="Print the rationale and exit without starting an agent",
+    )
+    parser.add_argument(
+        "--classified",
+        action="store_true",
+        help="Hide lanes that are not classified-ok",
+    )
+    parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="Start the suggested lane without prompting",
+    )
+    return parser
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="herdr_model_lanes.py",
+        description="Show subscription capacity and route a model-class lane.",
+    )
+    sub = parser.add_subparsers(dest="command")
+    refresh_p = sub.add_parser("refresh", help="Refresh quota caches and publish the sidebar line")
+    refresh_p.add_argument(
+        "--force",
+        action="store_true",
+        help="Bypass per-source refresh intervals",
+    )
+    sub.add_parser("clear", help="Clear the model_quota token from every workspace")
+    route_parent = _route_parser(add_help=False)
+    sub.add_parser(
+        "route",
+        parents=[route_parent],
+        help="Pick a lane for a model class",
+        description=route_parent.description,
+    )
+    ag_parent = _ag_parser(add_help=False)
+    sub.add_parser(
+        "ag",
+        parents=[ag_parent],
+        help="Pick a lane and exec it in this shell",
+        prog="ag",
+        description=ag_parent.description,
+        epilog=ag_parent.epilog,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    return parser
+
+
+def resolve_route(
+    class_name: str,
+    *,
+    classified: bool = False,
+    lane_override: str | None = None,
     herdr_bin: str = "herdr",
     now: int | None = None,
-) -> int:
-    """``route <class> [--explain] [--launch] [--argv] [--classified]``."""
-    if not argv:
-        print(
-            "usage: route <class> [--explain] [--launch] [--argv] [--classified] [--lane NAME]",
-            file=sys.stderr,
-        )
-        return 2
-    class_name = argv[0]
-    launch = "--launch" in argv
-    argv_mode = "--argv" in argv
-    explain = "--explain" in argv or not (launch or argv_mode)
-    classified = "--classified" in argv
-    lane_override = None
-    if "--lane" in argv:
-        index = argv.index("--lane")
-        if index + 1 >= len(argv):
-            print("route: --lane needs a lane name", file=sys.stderr)
-            return 2
-        lane_override = argv[index + 1]
+    emit: bool = True,
+) -> tuple[ClassSpec, LaneSpec, list[str]]:
+    """Load quota, pick a lane, and apply an optional user override."""
     if now is None:
         now = int(time.time())
-
     class_spec = load_class_spec(class_name)
-    state_dir = state_dir_from_env()
     outcome = refresh(
-        state_dir=state_dir,
+        state_dir=state_dir_from_env(),
         now=now,
         herdr_bin=herdr_bin,
         include_grok=True,
         include_glm=True,
         include_antigravity=True,
         include_kimi=True,
-        emit=not argv_mode,
+        emit=emit,
     )
     quotas: dict[str, QuotaWindow | None] = {
         "codex": outcome.codex.weekly if outcome.codex else None,
@@ -1642,52 +1744,232 @@ def route_command(
             (item for item in class_spec.lanes if item.name == lane_override), None
         )
         if chosen is None:
-            print(
-                f"route: no lane {lane_override!r} in class {class_name!r}",
-                file=sys.stderr,
-            )
-            return 2
+            raise QuotaError(f"no lane {lane_override!r} in class {class_name!r}")
         if classified and not chosen.classified_ok:
-            print(
-                f"route: lane {lane_override!r} is not classified-ok",
-                file=sys.stderr,
-            )
-            return 2
+            raise QuotaError(f"lane {lane_override!r} is not classified-ok")
         lane = chosen
         rationale.append(f"override: {lane.name} (chosen by user)")
+    return class_spec, lane, rationale
+
+
+def route_command(
+    argv: list[str],
+    herdr_bin: str = "herdr",
+    now: int | None = None,
+) -> int:
+    """``route <class> [--explain] [--launch] [--argv] [--classified] [--lane NAME]``."""
+    parser = _route_parser()
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        return int(exc.code or 0)
+    argv_mode = args.argv_mode
+    explain = args.explain or not (args.launch or argv_mode)
+    try:
+        class_spec, lane, rationale = resolve_route(
+            args.class_name,
+            classified=args.classified,
+            lane_override=args.lane,
+            herdr_bin=herdr_bin,
+            now=now,
+            emit=not argv_mode,
+        )
+    except QuotaError as exc:
+        print(f"route: {exc}", file=sys.stderr)
+        return 2 if "lane" in str(exc) else 1
     stream = sys.stderr if argv_mode else sys.stdout
     for line in rationale:
         print(line, file=stream)
     pick_line = rationale[-1]
-
     if argv_mode:
         print(shlex.join(lane_command(lane)), flush=True)
     if explain and not argv_mode:
-        _notify_route(herdr_bin, class_name, pick_line)
-    if launch:
+        _notify_route(herdr_bin, args.class_name, pick_line)
+    if args.launch:
         _launch(herdr_bin, class_spec, lane, pick_line)
     return 0
 
 
-def main(argv: list[str]) -> int:
-    if argv and argv[0] == "clear":
-        clear_all()
+def picker_lines(rationale: list[str], pick_name: str) -> tuple[list[str], list[str]]:
+    """Numbered picker rows and the lane names they refer to."""
+    names: list[str] = []
+    rows: list[str] = []
+    for line in rationale:
+        if line.startswith(("pick:", "override:")):
+            continue
+        name = line.split(":", 1)[0]
+        names.append(name)
+        mark = "*" if name == pick_name else " "
+        rows.append(f"{mark} {len(names)}) {line}")
+    return names, rows
+
+
+def _ag_timeout_secs() -> int:
+    raw = os.environ.get("AG_TIMEOUT", "10")
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 10
+
+
+def read_picker_choice(timeout_secs: int) -> str:
+    """Read a picker answer from the controlling tty, or '' on timeout."""
+    if not sys.stdin.isatty():
+        return ""
+    try:
+        fd = os.open("/dev/tty", os.O_RDONLY)
+    except OSError:
+        return ""
+    try:
+        ready, _, _ = select.select([fd], [], [], timeout_secs)
+        if not ready:
+            return ""
+        data = os.read(fd, 256).decode("utf-8", "replace")
+    except OSError:
+        return ""
+    finally:
+        os.close(fd)
+    line = data.splitlines()[0] if data else ""
+    return line.strip()
+
+
+def _ensure_ag_state_dir() -> None:
+    if state_dir_from_env() is not None:
+        return
+    xdg = os.environ.get("XDG_STATE_HOME")
+    root = Path(xdg) if xdg else Path.home() / ".local" / "state"
+    os.environ["HERDR_PLUGIN_STATE_DIR"] = str(
+        root / "herdr" / "plugins" / "terry.herdr-model-lanes"
+    )
+
+
+def ag_command(
+    argv: list[str],
+    herdr_bin: str = "herdr",
+    now: int | None = None,
+    exec_fn=os.execvp,
+    choice_fn=None,
+) -> int:
+    """``ag [CLASS] [--explain] [--classified] [-y]``."""
+    parser = _ag_parser()
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        return int(exc.code or 0)
+    _ensure_ag_state_dir()
+    assume_yes = args.yes or os.environ.get("AG_YES") == "1"
+    try:
+        class_spec, lane, rationale = resolve_route(
+            args.class_name,
+            classified=args.classified,
+            herdr_bin=herdr_bin,
+            now=now,
+            emit=False,
+        )
+    except QuotaError as exc:
+        print(f"ag: {exc}", file=sys.stderr)
+        return 1
+    names, rows = picker_lines(rationale, lane.name)
+    for row in rows:
+        print(row, file=sys.stderr)
+    print(rationale[-1], file=sys.stderr)
+    if args.explain:
         return 0
-    if argv and argv[0] == "route":
+    timeout = _ag_timeout_secs()
+    if not assume_yes:
+        print(
+            f"ag: Enter = start {lane.name}, number = other lane, q = quit "
+            f"(auto in {timeout}s): ",
+            end="",
+            file=sys.stderr,
+            flush=True,
+        )
+        reader = choice_fn if choice_fn is not None else read_picker_choice
+        answer = reader(timeout)
+        print(file=sys.stderr)
+        if answer in {"q", "Q"}:
+            print("ag: aborted", file=sys.stderr)
+            return 0
+        if answer not in {"", "y", "Y"}:
+            chosen = None
+            for index, name in enumerate(names, start=1):
+                if str(index) == answer:
+                    chosen = name
+                    break
+            if chosen is None:
+                print(f"ag: no lane number {answer}", file=sys.stderr)
+                return 2
+            try:
+                class_spec, lane, rationale = resolve_route(
+                    args.class_name,
+                    classified=args.classified,
+                    lane_override=chosen,
+                    herdr_bin=herdr_bin,
+                    now=now,
+                    emit=False,
+                )
+            except QuotaError as exc:
+                print(f"ag: {exc}", file=sys.stderr)
+                return 2
+            print(rationale[-1], file=sys.stderr)
+    pane_id = os.environ.get("HERDR_PANE_ID", "")
+    if pane_id:
         try:
-            return route_command(argv[1:])
-        except QuotaError as exc:
-            print(f"route error: {exc}", file=sys.stderr)
-            return 1
+            _run_herdr_command(
+                herdr_bin,
+                ["pane", "rename", pane_id, f"{class_spec.name}: {lane.name}"],
+                "herdr pane rename",
+            )
+        except QuotaError:
+            pass
+        _notify_route(herdr_bin, f"ag {class_spec.name} -> {lane.name}", rationale[-1])
+    print(f"ag: starting {lane.name}", file=sys.stderr)
+    command = lane_command(lane)
+    try:
+        exec_fn(command[0], command)
+    except FileNotFoundError:
+        print(f"ag: {command[0]} not found on PATH", file=sys.stderr)
+        return 127
+    return 0
+
+
+def _cmd_refresh(force: bool) -> int:
     include_grok = Path.home().joinpath(".grok", "auth.json").exists()
     refresh(
-        force="--force" in argv,
+        force=force,
         include_grok=include_grok,
         include_glm=glm_usage.key_available(),
         include_antigravity=antigravity_usage.probe_available(),
         include_kimi=kimi_usage.key_available(),
     )
     return 0
+
+
+def main(argv: list[str]) -> int:
+    parser = build_parser()
+    if not argv:
+        return _cmd_refresh(force=False)
+    if argv[0] in {"-h", "--help"}:
+        parser.print_help()
+        return 0
+    if argv[0] not in {"refresh", "clear", "route", "ag"}:
+        argv = ["refresh", *argv]
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        return int(exc.code or 0)
+    if args.command == "clear":
+        clear_all()
+        return 0
+    if args.command == "route":
+        try:
+            return route_command(argv[1:], herdr_bin="herdr")
+        except QuotaError as exc:
+            print(f"route error: {exc}", file=sys.stderr)
+            return 1
+    if args.command == "ag":
+        return ag_command(argv[1:])
+    return _cmd_refresh(force=getattr(args, "force", False))
 
 
 if __name__ == "__main__":

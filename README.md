@@ -173,11 +173,21 @@ happens once at launch; nothing re-routes a running pane.
 
 ### `ag`
 
-`bin/ag` wraps `route --argv` for the current shell: `ag [class]
-[--explain] [--classified]` (default class `medium`) prints the rationale
-and `exec`s the chosen lane in the current pane — no new tab, own cwd,
-Herdr detects the agent normally. It sets
-`HERDR_PLUGIN_STATE_DIR` to
+`bin/ag` is a thin argparse wrapper around `herdr_model_lanes.py ag`.
+`ag --help` is the contract. Default class is `medium`. It prints each
+lane's quota, stars the suggestion, and execs the chosen agent in this
+shell — no new tab, own cwd, Herdr detects the agent normally.
+
+```text
+ag              # picker, then exec
+ag high         # Fable or Sol
+ag --classified # hide glm, agy, kimi
+ag medium -y    # skip the prompt
+```
+
+Enter starts the star, a number starts that lane, `q` quits. After
+`AG_TIMEOUT` seconds (default 10) it starts the suggestion. `AG_YES=1`
+skips the prompt. It sets `HERDR_PLUGIN_STATE_DIR` to
 `${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/terry.herdr-model-lanes`
 when unset. Install it as a symlink so updates are picked up:
 

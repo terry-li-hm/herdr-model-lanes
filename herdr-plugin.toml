@@ -1,6 +1,6 @@
 id = "terry.herdr-model-lanes"
 name = "Model Lanes"
-version = "3.5.0"
+version = "3.6.0"
 min_herdr_version = "0.8.0"
 description = "Show Codex, Claude Max, Grok, GLM, Antigravity, and Kimi Code subscription capacity in the focused workspace row, and route new agent tabs to a model class lane by remaining quota. Claude support is experimental, macOS-only, and reads an undocumented Anthropic endpoint."
 platforms = ["macos", "linux"]

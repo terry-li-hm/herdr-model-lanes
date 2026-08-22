@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.6.0 - 2026-08-22
+
+### Changed
+
+- `ag` and the plugin CLI now use argparse (stdlib only, no Typer/Click
+  dependency). `ag --help` documents the picker; `route`, `refresh`, and
+  `clear` are real subcommands. The numbered picker moved into Python, and
+  `bin/ag` is a thin exec into `herdr_model_lanes.py ag`. Starting a lane
+  uses `os.execvp` instead of `eval exec`.
+
 ## 3.5.0 - 2026-08-22
 
 ### Added

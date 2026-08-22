@@ -1037,3 +1037,104 @@ class SelectLanePropertyTests(unittest.TestCase):
                 self.assertGreater(
                     picked_window.window_seconds, quota.SURPLUS_RESET_WINDOW_SECS
                 )
+
+
+class ArgparseCliTests(unittest.TestCase):
+    def test_ag_help_documents_picker_and_examples(self) -> None:
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            rc = quota.ag_command(["--help"])
+
+        self.assertEqual(rc, 0)
+        help_text = stdout.getvalue()
+        self.assertIn("Enter", help_text)
+        self.assertIn("ag high", help_text)
+        self.assertIn("--classified", help_text)
+
+    def test_top_level_help_lists_subcommands(self) -> None:
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            rc = quota.main(["--help"])
+
+        self.assertEqual(rc, 0)
+        self.assertIn("ag", stdout.getvalue())
+        self.assertIn("route", stdout.getvalue())
+
+    def test_unknown_ag_flag_is_usage_error(self) -> None:
+        with mock.patch("sys.stderr", new_callable=io.StringIO):
+            rc = quota.ag_command(["--bogus"])
+
+        self.assertEqual(rc, 2)
+
+    @mock.patch("herdr_model_lanes.refresh")
+    def test_ag_yes_execs_the_suggested_lane(self, refresh: mock.Mock) -> None:
+        refresh.return_value = quota.RefreshOutcome(
+            codex=quota.CodexUsage(window(80, WEEK), NOW, "pro"),
+            claude=None,
+            codex_stale=False,
+            claude_stale=False,
+        )
+        executed: list[list[str]] = []
+
+        def exec_fn(file: str, args: list[str]) -> None:
+            executed.append([file, *args[1:]])
+
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            rc = quota.ag_command(["medium", "-y"], now=NOW, exec_fn=exec_fn)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(executed, [["pi", "--provider", "openai-codex", "--model", "gpt-5.6-sol"]])
+        self.assertIn("ag: starting sol", stderr.getvalue())
+
+    @mock.patch("herdr_model_lanes.refresh")
+    def test_ag_number_overrides_the_pick(self, refresh: mock.Mock) -> None:
+        refresh.return_value = quota.RefreshOutcome(
+            codex=quota.CodexUsage(window(100, WEEK), NOW, "pro"),
+            claude=None,
+            codex_stale=False,
+            claude_stale=False,
+            grok=quota.GrokUsage(window(90, WEEK), NOW),
+        )
+        executed: list[str] = []
+
+        rc = quota.ag_command(
+            ["medium"],
+            now=NOW,
+            exec_fn=lambda file, args: executed.append(file),
+            choice_fn=lambda _timeout: "4",
+        )
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(executed, ["grok"])
+
+    @mock.patch("herdr_model_lanes.refresh")
+    def test_ag_quit_does_not_exec(self, refresh: mock.Mock) -> None:
+        refresh.return_value = quota.RefreshOutcome(
+            codex=None,
+            claude=None,
+            codex_stale=False,
+            claude_stale=False,
+        )
+        executed: list[str] = []
+
+        rc = quota.ag_command(
+            ["medium"],
+            now=NOW,
+            exec_fn=lambda file, args: executed.append(file),
+            choice_fn=lambda _timeout: "q",
+        )
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(executed, [])
+
+    def test_picker_lines_mark_the_suggestion(self) -> None:
+        names, rows = quota.picker_lines(
+            [
+                "sol: 80% left, resets in 4d, health 1.09",
+                "grok: n/a (grok quota unavailable)",
+                "pick: sol (first healthy lane in order)",
+            ],
+            "sol",
+        )
+
+        self.assertEqual(names, ["sol", "grok"])
+        self.assertTrue(rows[0].startswith("* 1) sol:"))
+        self.assertTrue(rows[1].startswith("  2) grok:"))

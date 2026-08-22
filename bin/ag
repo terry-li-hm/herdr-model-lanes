@@ -1,31 +1,14 @@
 #!/bin/sh
-# ag: route a model class and exec the chosen lane in this shell.
-# Usage: ag [class] [--explain] [--classified] [-y]; default class medium.
-# Shows each lane's quota, marks the suggested lane, and waits for Enter / a number / q
-# (auto-accepts after AG_TIMEOUT seconds, default 10). -y or AG_YES=1 skips the prompt.
+# ag: argparse front end for herdr_model_lanes.py ag.
+# Usage: ag [CLASS] [--explain] [--classified] [-y]
+# Enter starts the starred lane, a number starts that lane, q quits.
 
 set -eu
 
-class="medium"
-explain=""
-classified=""
-assume_yes="${AG_YES:-0}"
-for arg in "$@"; do
-    case "$arg" in
-        --explain) explain="--explain" ;;
-        --classified) classified="--classified" ;;
-        -y|--yes) assume_yes=1 ;;
-        --*) echo "ag: unknown option: $arg" >&2; exit 2 ;;
-        *) class="$arg" ;;
-    esac
-done
-
-# Resolve the plugin directory from this script's own resolved path.
 script="$0"
 if resolved=$(readlink -f "$script" 2>/dev/null) && [ -n "$resolved" ]; then
     script="$resolved"
 else
-    # macOS fallback when readlink -f is unavailable.
     script=$(python3 - "$script" <<'EOF'
 import os
 import sys
@@ -36,62 +19,7 @@ EOF
 fi
 plugin_dir=$(CDPATH= cd -- "$(dirname -- "$script")/.." && pwd)
 
-# Cache directory: Herdr's variable, else MODEL_LANES_STATE_DIR, else the plugin's default.
 : "${HERDR_PLUGIN_STATE_DIR:=${MODEL_LANES_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/terry.herdr-model-lanes}}"
 export HERDR_PLUGIN_STATE_DIR
 
-if [ -n "$explain" ]; then
-    exec python3 "$plugin_dir/herdr_model_lanes.py" route "$class" $explain $classified
-fi
-
-rationale=$(mktemp "${TMPDIR:-/tmp}/ag.XXXXXX")
-trap 'rm -f "$rationale"' EXIT
-argv=$(python3 "$plugin_dir/herdr_model_lanes.py" route "$class" --argv $classified 2>"$rationale") || true
-if [ -z "$argv" ]; then
-    cat "$rationale" >&2
-    echo "ag: no argv produced for class $class" >&2
-    exit 1
-fi
-pick=$(grep '^pick:' "$rationale" | tail -n 1)
-lane=${pick#pick: }; lane=${lane%% *}
-
-# Show the data and the suggestion; let the user confirm or override.
-lanes=$(grep -E '^[a-z0-9_-]+: ' "$rationale" | grep -v '^pick:' | grep -v '^override:' | cut -d: -f1)
-i=0
-for name in $lanes; do
-    i=$((i+1))
-    line=$(grep -E "^$name: " "$rationale" | head -n 1)
-    if [ "$name" = "$lane" ]; then mark="*"; else mark=" "; fi
-    printf '%s %d) %s\n' "$mark" "$i" "$line" >&2
-done
-printf '%s\n' "$pick" >&2
-if [ "$assume_yes" != "1" ] && [ -t 0 ]; then
-    printf 'ag: Enter = start %s, number = other lane, q = quit (auto in %ss): ' "$lane" "${AG_TIMEOUT:-10}" >&2
-    answer=""
-    if command -v bash >/dev/null 2>&1; then
-        answer=$(bash -c 'read -t "$1" -r a </dev/tty 2>/dev/null; printf "%s" "$a"' _ "${AG_TIMEOUT:-10}" || true)
-    else
-        read -r answer </dev/tty || true
-    fi
-    echo >&2
-    case "$answer" in
-        q|Q) echo "ag: aborted" >&2; exit 0 ;;
-        ''|y|Y) ;;
-        *)
-            j=0; chosen=""
-            for name in $lanes; do j=$((j+1)); [ "$j" = "$answer" ] && chosen="$name"; done
-            if [ -z "$chosen" ]; then echo "ag: no lane number $answer" >&2; exit 2; fi
-            lane="$chosen"
-            argv=$(python3 "$plugin_dir/herdr_model_lanes.py" route "$class" --argv --lane "$lane" $classified 2>/dev/null)
-            [ -n "$argv" ] || { echo "ag: could not resolve lane $lane" >&2; exit 1; }
-            ;;
-    esac
-fi
-
-# Keep the decision visible after the agent TUI takes the screen.
-if [ -n "${HERDR_PANE_ID:-}" ] && command -v herdr >/dev/null 2>&1; then
-    herdr pane rename "$HERDR_PANE_ID" "$class: $lane" >/dev/null 2>&1 || true
-    herdr notification show "ag $class -> $lane" --body "$pick" >/dev/null 2>&1 || true
-fi
-printf 'ag: starting %s\n' "$lane" >&2
-eval exec "$argv"
+exec python3 "$plugin_dir/herdr_model_lanes.py" ag "$@"
