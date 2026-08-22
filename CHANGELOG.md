@@ -1,5 +1,10 @@
 # Changelog
 
+## 3.1.0 - 2026-08-22
+
+`ag` and the readers work without Herdr: `MODEL_LANES_STATE_DIR` is honoured when
+`HERDR_PLUGIN_STATE_DIR` is unset, and the README documents the standalone install.
+
 ## 3.0.0 - 2026-08-22
 
 Renamed from `herdr-model-lanes` to `herdr-model-lanes`: the plugin id is now

@@ -147,7 +147,7 @@ additionally requires a Grok CLI login under `~/.grok`.
 Install the pinned release from GitHub:
 
 ```bash
-herdr plugin install terry-li-hm/herdr-model-lanes --ref v3.0.0
+herdr plugin install terry-li-hm/herdr-model-lanes --ref v3.1.0
 ```
 
 Then add the sidebar configuration above, run `herdr server reload-config`, and
@@ -178,3 +178,20 @@ credentials; deleting that directory removes every trace.
 See `SECURITY.md` for the trust model and reporting channels.
 
 `ag` pauses `AG_DELAY` seconds (default 3) before exec so the rationale can be read, renames the Herdr pane to `<class>: <lane>`, and shows the pick as a Herdr notification when run inside Herdr.
+
+## Using `ag` without Herdr
+
+Herdr is only the front end. The quota readers talk to Codex, Anthropic and Grok
+directly, lane selection is a pure function over their caches, and `ag` makes no
+Herdr call unless `HERDR_PANE_ID` is set. In any shell:
+
+```sh
+git clone https://github.com/terry-li-hm/herdr-model-lanes ~/code/herdr-model-lanes
+ln -s ~/code/herdr-model-lanes/bin/ag ~/.local/bin/ag
+export MODEL_LANES_STATE_DIR=~/.local/state/model-lanes   # optional; any writable dir
+ag --explain
+ag            # execs the chosen lane in this shell
+```
+
+The Claude Max reader is macOS-only (Keychain); on Linux the Claude lanes show
+`n/a` and rank last, while Codex and Grok lanes route normally.

@@ -804,6 +804,15 @@ def _refresh_grok(
             return cached, cached is not None, str(exc)
 
 
+def state_dir_from_env() -> Path | None:
+    """Resolve the cache directory: Herdr's variable first, then the standalone one."""
+    for name in ("HERDR_PLUGIN_STATE_DIR", "MODEL_LANES_STATE_DIR"):
+        value = os.environ.get(name)
+        if value:
+            return Path(value)
+    return None
+
+
 def refresh(
     force: bool = False,
     state_dir: Path | None = None,
@@ -818,12 +827,11 @@ def refresh(
     if now is None:
         now = int(time.time())
     if state_dir is None:
-        state_value = os.environ.get("HERDR_PLUGIN_STATE_DIR")
-        if not state_value:
+        state_dir = state_dir_from_env()
+        if state_dir is None:
             line = format_quota(None, None, now)
             print(line, file=sys.stdout if emit else sys.stderr, flush=True)
             return RefreshOutcome(None, None, False, False, ("no state dir",))
-        state_dir = Path(state_value)
 
     codex, codex_stale, codex_error = _refresh_codex(
         force, state_dir / CODEX_CACHE_FILENAME, now, codex_bin
@@ -1124,8 +1132,7 @@ def route_command(
         now = int(time.time())
 
     class_spec = load_class_spec(class_name)
-    state_value = os.environ.get("HERDR_PLUGIN_STATE_DIR")
-    state_dir = Path(state_value) if state_value else None
+    state_dir = state_dir_from_env()
     outcome = refresh(
         state_dir=state_dir,
         now=now,

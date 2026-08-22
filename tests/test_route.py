@@ -462,3 +462,19 @@ class RouteCommandTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StateDirTests(unittest.TestCase):
+    def test_state_dir_env_fallback(self) -> None:
+        with mock.patch.dict(
+            "os.environ", {"MODEL_LANES_STATE_DIR": "/tmp/ml"}, clear=True
+        ):
+            self.assertEqual(quota.state_dir_from_env(), Path("/tmp/ml"))
+        with mock.patch.dict(
+            "os.environ",
+            {"HERDR_PLUGIN_STATE_DIR": "/tmp/hd", "MODEL_LANES_STATE_DIR": "/tmp/ml"},
+            clear=True,
+        ):
+            self.assertEqual(quota.state_dir_from_env(), Path("/tmp/hd"))
+        with mock.patch.dict("os.environ", {}, clear=True):
+            self.assertIsNone(quota.state_dir_from_env())

@@ -32,7 +32,8 @@ EOF
 fi
 plugin_dir=$(CDPATH= cd -- "$(dirname -- "$script")/.." && pwd)
 
-: "${HERDR_PLUGIN_STATE_DIR:=${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/terry.herdr-model-lanes}"
+# Cache directory: Herdr's variable, else MODEL_LANES_STATE_DIR, else the plugin's default.
+: "${HERDR_PLUGIN_STATE_DIR:=${MODEL_LANES_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/terry.herdr-model-lanes}}"
 export HERDR_PLUGIN_STATE_DIR
 
 if [ -n "$explain" ]; then
