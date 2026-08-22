@@ -231,14 +231,16 @@ def fetch_quota(
             status = getattr(response, "status", 200) or 200
             if status != 200:
                 raise GlmUsageError(f"quota endpoint returned HTTP {status}")
-            body = response.read(MAX_RESPONSE_BYTES)
+            body = response.read(MAX_RESPONSE_BYTES + 1)
     except GlmUsageError:
         raise
     except Exception as exc:
         raise GlmUsageError(f"quota request failed: {type(exc).__name__}") from exc
+    if len(body) > MAX_RESPONSE_BYTES:
+        raise GlmUsageError("quota endpoint response exceeded 1 MiB")
     try:
         document = json.loads(body)
-    except ValueError as exc:
+    except (ValueError, RecursionError) as exc:
         raise GlmUsageError("quota endpoint returned invalid JSON") from exc
     return parse_quota(document)
 

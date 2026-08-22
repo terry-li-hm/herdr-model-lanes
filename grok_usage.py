@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import json
 import sys
-import time
 import urllib.request
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 
 PLUGIN_VERSION = "2.2.0"
@@ -22,6 +22,7 @@ BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
 AUTH_FILENAME = Path.home() / ".grok" / "auth.json"
 FETCH_TIMEOUT_SECS = 5
 MAX_RESPONSE_BYTES = 1 << 20
+MAX_TIMESTAMP_CHARS = 48
 USER_AGENT = f"herdr-model-lanes/{PLUGIN_VERSION} (Grok usage helper)"
 WEEKLY_PERIOD_TYPE = "USAGE_PERIOD_TYPE_WEEKLY"
 
@@ -60,10 +61,14 @@ def read_login_key(auth_path: Path | None = None) -> str:
 def _parse_resets_at(value: object) -> str:
     if not isinstance(value, str) or not value:
         raise GrokUsageError("billing response missing period end timestamp")
+    if len(value) > MAX_TIMESTAMP_CHARS:
+        raise GrokUsageError("billing period end is not a timestamp")
     try:
-        time.strptime(value[: len("2026-08-22T00:00:00")], "%Y-%m-%dT%H:%M:%S")
+        parsed = datetime.fromisoformat(value)
     except ValueError as exc:
         raise GrokUsageError("billing period end is not a timestamp") from exc
+    if parsed.tzinfo is None:
+        raise GrokUsageError("billing period end is not a timestamp")
     return value
 
 
@@ -125,14 +130,16 @@ def fetch_credits(
             status = getattr(response, "status", 200) or 200
             if status != 200:
                 raise GrokUsageError(f"billing endpoint returned HTTP {status}")
-            body = response.read(MAX_RESPONSE_BYTES)
+            body = response.read(MAX_RESPONSE_BYTES + 1)
     except GrokUsageError:
         raise
     except Exception as exc:
         raise GrokUsageError(f"billing request failed: {type(exc).__name__}") from exc
+    if len(body) > MAX_RESPONSE_BYTES:
+        raise GrokUsageError("billing endpoint response exceeded 1 MiB")
     try:
         document = json.loads(body)
-    except ValueError as exc:
+    except (ValueError, RecursionError) as exc:
         raise GrokUsageError("billing endpoint returned invalid JSON") from exc
     return parse_billing(document)
 
