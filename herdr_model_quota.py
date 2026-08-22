@@ -14,6 +14,7 @@ import fcntl
 import json
 import os
 import queue
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -991,7 +992,8 @@ def _launch(herdr_bin: str, class_spec: ClassSpec, lane: LaneSpec, line: str) ->
         )
         try:
             document = json.loads(completed.stdout or "{}")
-            pane_cwd = (document.get("result") or document).get("cwd")
+            pane = (document.get("result") or document).get("pane") or {}
+            pane_cwd = pane.get("cwd")
             if isinstance(pane_cwd, str) and pane_cwd:
                 cwd = pane_cwd
         except ValueError:
@@ -1019,23 +1021,17 @@ def _launch(herdr_bin: str, class_spec: ClassSpec, lane: LaneSpec, line: str) ->
     except ValueError as exc:
         raise QuotaError("herdr tab create returned invalid JSON") from exc
     result = document.get("result") or document
-    new_pane = result.get("pane_id") or result.get("paneId") or result.get("id")
-    tabnum = result.get("tab_number") or result.get("number") or result.get("tab_id")
+    root_pane = result.get("root_pane") or {}
+    tab = result.get("tab") or {}
+    new_pane = root_pane.get("pane_id")
+    tabnum = tab.get("number") or tab.get("tab_id")
     if not isinstance(new_pane, str) or not new_pane:
         raise QuotaError("herdr tab create returned no pane id")
 
     _run_herdr_command(
         herdr_bin,
-        [
-            "pane",
-            "send",
-            new_pane,
-            "--",
-            "printf",
-            "%s\\n",
-            line,
-        ],
-        "herdr pane send",
+        ["pane", "run", new_pane, f"printf '%s\\n' {shlex.quote(line)}"],
+        "herdr pane run",
     )
     _run_herdr_command(
         herdr_bin,

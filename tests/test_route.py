@@ -237,15 +237,17 @@ class RouteCommandTests(unittest.TestCase):
         herdr_run.side_effect = [
             mock.Mock(  # pane get
                 returncode=0,
-                stdout=json.dumps({"result": {"cwd": "/Users/terry/work"}}),
+                stdout=json.dumps({"result": {"pane": {"cwd": "/Users/terry/work"}}}),
                 stderr="",
             ),
             mock.Mock(  # tab create
                 returncode=0,
-                stdout=json.dumps({"result": {"pane_id": "p9", "tab_number": 7}}),
+                stdout=json.dumps(
+                    {"result": {"root_pane": {"pane_id": "p9"}, "tab": {"number": 7}}}
+                ),
                 stderr="",
             ),
-            mock.Mock(returncode=0, stdout="{}", stderr=""),  # pane send
+            mock.Mock(returncode=0, stdout="{}", stderr=""),  # pane run
             mock.Mock(returncode=0, stdout="{}", stderr=""),  # agent start
         ]
 
@@ -275,8 +277,8 @@ class RouteCommandTests(unittest.TestCase):
                 "medium: grok",
             ],
         )
-        self.assertEqual(argvs[2][0:2], ["pane", "send"])
-        self.assertEqual(argvs[2][2], "p9")
+        self.assertEqual(argvs[2][0:3], ["pane", "run", "p9"])
+        self.assertTrue(argvs[2][3].startswith("printf"))
         self.assertEqual(argvs[3][0:2], ["agent", "start"])
         self.assertEqual(argvs[3][2], "medium-grok-7")
         self.assertEqual(argvs[3][3:7], ["--kind", "grok", "--pane", "p9"])
