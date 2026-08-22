@@ -61,7 +61,7 @@ names in `~/.env.resolved`, then `~/.pi/agent/models.json`
 and prints only the normalized five-hour token window (the `TOKENS_LIMIT`
 entry with the nearest reset). The base is `https://open.bigmodel.cn` when the
 key came from a Zhipu/BigModel source and `https://api.z.ai` otherwise,
-overridable with `MODEL_LANES_GLM_BASE`. Known limit (2026-08-22): the BigModel CN coding plan's monitor endpoint accepts the platform login token, not coding-plan API keys, and answers `code 500` to them, so on that plan `Gl` shows `n/a` and the `glm` lane ranks last; Z.ai global-plan keys are expected to work. No key is ever stored, logged, or
+overridable with `MODEL_LANES_GLM_BASE`. No key is ever stored, logged, or
 cached. The `Gl` segment uses the same `!`/`!!`/`~` rules, refreshes at a
 five-minute cadence (the window is five hours), shows `Gl n/a` when no key is
 available, and the router judges it on a five-hour pace, not a weekly one.
@@ -195,7 +195,7 @@ credentials; deleting that directory removes every trace.
 
 See `SECURITY.md` for the trust model and reporting channels.
 
-`ag` pauses `AG_DELAY` seconds (default 3) before exec so the rationale can be read, renames the Herdr pane to `<class>: <lane>`, and shows the pick as a Herdr notification when run inside Herdr.
+`ag` prints each lane's quota with the suggested lane marked `*`, then waits: Enter (or `AG_TIMEOUT` seconds of silence, default 10) starts the suggestion, a number starts that lane instead, `q` quits; `ag -y` (or `AG_YES=1`) skips the prompt. Inside Herdr it also renames the pane to `<class>: <lane>` and shows the pick as a notification.
 
 ## Using `ag` without Herdr
 
@@ -213,3 +213,5 @@ ag            # execs the chosen lane in this shell
 
 The Claude Max reader is macOS-only (Keychain); on Linux the Claude lanes show
 `n/a` and rank last, while Codex and Grok lanes route normally.
+
+Surplus applies only to windows longer than 48 hours; a five-hour window (GLM) always resets soon and refills anyway, so it never overrides class order on surplus alone.

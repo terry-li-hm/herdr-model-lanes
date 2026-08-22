@@ -602,3 +602,20 @@ class StateDirTests(unittest.TestCase):
             self.assertEqual(quota.state_dir_from_env(), Path("/tmp/hd"))
         with mock.patch.dict("os.environ", {}, clear=True):
             self.assertIsNone(quota.state_dir_from_env())
+
+
+class ShortWindowSurplusTests(unittest.TestCase):
+    def test_short_window_never_counts_as_surplus(self) -> None:
+        spec = quota.load_class_spec("medium")
+        short = quota.QuotaWindow(1, 99, NOW + 3600, window_seconds=5 * 3600)
+        weekly_ok = quota.QuotaWindow(25, 75, NOW + 4 * 86400)
+        quotas = {
+            "codex": weekly_ok,
+            "claude": None,
+            "grok": None,
+            "glm": short,
+            "cursor": None,
+        }
+        lane, rationale = quota.select_lane(spec, quotas, NOW)
+        self.assertEqual(lane.name, "sol")
+        self.assertIn("first healthy lane in order", rationale[-1])

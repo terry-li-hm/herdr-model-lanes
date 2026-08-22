@@ -1118,7 +1118,8 @@ def select_lane(
     surplus = [
         (index, lane, window)
         for index, lane, window in candidates
-        if _lane_health(window, now) >= SURPLUS_HEALTH
+        if window.window_seconds > SURPLUS_RESET_WINDOW_SECS
+        and _lane_health(window, now) >= SURPLUS_HEALTH
         and 0 <= window.resets_at - now <= SURPLUS_RESET_WINDOW_SECS
     ]
     if surplus:
@@ -1275,7 +1276,7 @@ def route_command(
     """``route <class> [--explain] [--launch] [--argv] [--classified]``."""
     if not argv:
         print(
-            "usage: route <class> [--explain] [--launch] [--argv] [--classified]",
+            "usage: route <class> [--explain] [--launch] [--argv] [--classified] [--lane NAME]",
             file=sys.stderr,
         )
         return 2
@@ -1284,6 +1285,13 @@ def route_command(
     argv_mode = "--argv" in argv
     explain = "--explain" in argv or not (launch or argv_mode)
     classified = "--classified" in argv
+    lane_override = None
+    if "--lane" in argv:
+        index = argv.index("--lane")
+        if index + 1 >= len(argv):
+            print("route: --lane needs a lane name", file=sys.stderr)
+            return 2
+        lane_override = argv[index + 1]
     if now is None:
         now = int(time.time())
 
@@ -1304,6 +1312,18 @@ def route_command(
         "glm": outcome.glm.five_hour if outcome.glm else None,
     }
     lane, rationale = select_lane(class_spec, quotas, now, classified=classified)
+    if lane_override:
+        chosen = next(
+            (item for item in class_spec.lanes if item.name == lane_override), None
+        )
+        if chosen is None:
+            print(
+                f"route: no lane {lane_override!r} in class {class_name!r}",
+                file=sys.stderr,
+            )
+            return 2
+        lane = chosen
+        rationale.append(f"override: {lane.name} (chosen by user)")
     stream = sys.stderr if argv_mode else sys.stdout
     for line in rationale:
         print(line, file=stream)

@@ -9,6 +9,13 @@
   process environment so the coding-plan `ZHIPU_API_KEY` is used instead of a
   token that 500s on the quota API.
 
+## 3.3.0 - 2026-08-22
+
+`ag` shows each lane's quota with the suggestion marked and waits for Enter / a
+number / q (auto-accept after `AG_TIMEOUT`, `-y` to skip); `route --lane NAME`
+overrides the pick; the surplus-before-reset rule now applies only to windows
+longer than 48 hours, so GLM's five-hour window no longer overrides class order.
+
 ## 3.2.0 - 2026-08-22
 
 ### Added
