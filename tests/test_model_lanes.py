@@ -170,6 +170,25 @@ class FormatTests(unittest.TestCase):
             "Cx n/a | Cl 91%~",
         )
 
+    def test_coerces_wrong_type_optional_segments_to_na(self) -> None:
+        wrong = quota.GrokUsage(window(50, 50, 10_000), NOW)
+
+        line = quota.format_quota(
+            None,
+            None,
+            now=NOW,
+            grok="not-a-usage",
+            glm=wrong,
+            antigravity=wrong,
+            kimi=wrong,
+            cursor=wrong,
+        )
+
+        self.assertEqual(
+            line,
+            "Cx n/a | Cl n/a | Gk n/a | Gl n/a | Ag n/a | Km n/a | Cu n/a",
+        )
+
 
 class CacheTests(unittest.TestCase):
     def test_round_trips_only_normalized_fields(self) -> None:

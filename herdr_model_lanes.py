@@ -450,42 +450,22 @@ def format_quota(
             claude_text += " / " + " / ".join(constraints)
 
     line = f"{codex_text} | {claude_text}"
-    if grok is not UNSET:
-        grok_usage = grok if isinstance(grok, GrokUsage) else None
-        grok_text = "Gk n/a"
-        if grok_usage is not None:
-            grok_text = _format_window("Gk", grok_usage.weekly, now, grok_stale)
-        line += f" | {grok_text}"
-    if glm is not UNSET:
-        glm_usage_obj = glm if isinstance(glm, GlmUsage) else None
-        glm_text = "Gl n/a"
-        if glm_usage_obj is not None:
-            glm_text = _format_window("Gl", glm_usage_obj.five_hour, now, glm_stale)
-        line += f" | {glm_text}"
-    if antigravity is not UNSET:
-        antigravity_usage = (
-            antigravity if isinstance(antigravity, AntigravityUsage) else None
-        )
-        antigravity_text = "Ag n/a"
-        if antigravity_usage is not None:
-            antigravity_text = _format_window(
-                "Ag", antigravity_usage.gemini, now, antigravity_stale
-            )
-        line += f" | {antigravity_text}"
-    if kimi is not UNSET:
-        kimi_usage_obj = kimi if isinstance(kimi, KimiUsage) else None
-        kimi_text = "Km n/a"
-        if kimi_usage_obj is not None:
-            kimi_text = _format_window("Km", kimi_usage_obj.coding, now, kimi_stale)
-        line += f" | {kimi_text}"
-    if cursor is not UNSET:
-        cursor_usage_obj = cursor if isinstance(cursor, CursorUsage) else None
-        cursor_text = "Cu n/a"
-        if cursor_usage_obj is not None:
-            cursor_text = _format_window(
-                "Cu", cursor_usage_obj.monthly, now, cursor_stale
-            )
-        line += f" | {cursor_text}"
+    # Optional segments in display order; UNSET omits one, wrong types show n/a.
+    segments = (
+        (grok, grok_stale, GrokUsage, "Gk", lambda u: u.weekly),
+        (glm, glm_stale, GlmUsage, "Gl", lambda u: u.five_hour),
+        (antigravity, antigravity_stale, AntigravityUsage, "Ag", lambda u: u.gemini),
+        (kimi, kimi_stale, KimiUsage, "Km", lambda u: u.coding),
+        (cursor, cursor_stale, CursorUsage, "Cu", lambda u: u.monthly),
+    )
+    for value, stale, usage_type, label, window_of in segments:
+        if value is UNSET:
+            continue
+        usage = value if isinstance(value, usage_type) else None
+        text = f"{label} n/a"
+        if usage is not None:
+            text = _format_window(label, window_of(usage), now, stale)
+        line += f" | {text}"
     return line
 
 
