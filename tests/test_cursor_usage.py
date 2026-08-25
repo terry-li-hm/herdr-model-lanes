@@ -50,7 +50,9 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(window["monthly"]["used_percent"], 1)
         self.assertEqual(window["monthly"]["remaining_percent"], 99)
         self.assertEqual(window["monthly"]["window_seconds"], 2_678_400)
-        self.assertTrue(window["monthly"]["resets_at"].startswith("2026-09-19T06:05:05"))
+        self.assertTrue(
+            window["monthly"]["resets_at"].startswith("2026-09-19T06:05:05")
+        )
 
     def test_unlimited_is_full_remaining(self) -> None:
         payload = {
@@ -82,11 +84,7 @@ class TokenTests(unittest.TestCase):
         self.assertEqual(token, SYNTHETIC_JWT)
 
     def test_expired_token_is_unavailable(self) -> None:
-        expired = (
-            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
-            "eyJleHAiOjE3MDAwMDAwMDB9."
-            "c2ln"
-        )
+        expired = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3MDAwMDAwMDB9.c2ln"
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state.vscdb"
             write_state_db(path, expired)
@@ -113,7 +111,9 @@ class FetchTests(unittest.TestCase):
         window = helper.fetch_usage(SYNTHETIC_JWT, opener=opener)
 
         self.assertEqual(window["monthly"]["remaining_percent"], 99)
-        self.assertEqual(captured["cookie"], f"WorkosCursorSessionToken=::{SYNTHETIC_JWT}")
+        self.assertEqual(
+            captured["cookie"], f"WorkosCursorSessionToken=::{SYNTHETIC_JWT}"
+        )
 
     def test_errors_do_not_echo_token(self) -> None:
         def opener(request, timeout):
@@ -141,7 +141,9 @@ class MainTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertNotIn(SYNTHETIC_JWT, stdout.getvalue())
         self.assertNotIn(SYNTHETIC_JWT, stderr.getvalue())
-        self.assertEqual(json.loads(stdout.getvalue())["monthly"]["remaining_percent"], 99)
+        self.assertEqual(
+            json.loads(stdout.getvalue())["monthly"]["remaining_percent"], 99
+        )
 
 
 if __name__ == "__main__":

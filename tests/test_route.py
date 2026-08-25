@@ -489,7 +489,9 @@ class AntigravityTests(unittest.TestCase):
 
             loaded = quota.load_antigravity_cache(path)
             self.assertEqual(loaded, usage)
-            self.assertEqual(set(json.loads(path.read_text())), {"gemini", "fetched_at"})
+            self.assertEqual(
+                set(json.loads(path.read_text())), {"gemini", "fetched_at"}
+            )
 
     def test_route_picks_agy_when_it_is_the_only_healthy_lane(self) -> None:
         spec = medium_spec()
@@ -610,7 +612,9 @@ class KimiTests(unittest.TestCase):
             quota.save_kimi_cache(path, usage)
 
             self.assertEqual(quota.load_kimi_cache(path), usage)
-            self.assertEqual(set(json.loads(path.read_text())), {"coding", "fetched_at"})
+            self.assertEqual(
+                set(json.loads(path.read_text())), {"coding", "fetched_at"}
+            )
 
     def test_route_picks_kimi_when_it_is_the_only_healthy_lane(self) -> None:
         spec = medium_spec()
@@ -671,7 +675,9 @@ class KimiTests(unittest.TestCase):
         query_codex.side_effect = quota.QuotaError("Codex offline")
 
         with tempfile.TemporaryDirectory() as directory:
-            outcome = quota.refresh(state_dir=Path(directory), now=NOW, include_kimi=True)
+            outcome = quota.refresh(
+                state_dir=Path(directory), now=NOW, include_kimi=True
+            )
 
         self.assertIsNone(outcome.kimi)
         self.assertIn("Km n/a", publish.call_args.args[0])
@@ -1170,7 +1176,9 @@ class ArgparseCliTests(unittest.TestCase):
             rc = quota.ag_command(["medium", "-y"], now=NOW, exec_fn=exec_fn)
 
         self.assertEqual(rc, 0)
-        self.assertEqual(executed, [["pi", "--provider", "openai-codex", "--model", "gpt-5.6-sol"]])
+        self.assertEqual(
+            executed, [["pi", "--provider", "openai-codex", "--model", "gpt-5.6-sol"]]
+        )
         self.assertIn("ag: starting sol", stderr.getvalue())
 
     @mock.patch("herdr_model_lanes.refresh")

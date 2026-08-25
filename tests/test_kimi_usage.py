@@ -30,7 +30,9 @@ class FakeResponse:
 
 
 @contextlib.contextmanager
-def isolated_lookup(*, env_resolved: dict[str, str] | None = None, cli: dict | None = None):
+def isolated_lookup(
+    *, env_resolved: dict[str, str] | None = None, cli: dict | None = None
+):
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         env_path = root / "env.resolved"
@@ -52,7 +54,9 @@ class ParseTests(unittest.TestCase):
         window = helper.parse_usages(payload)
 
         self.assertEqual(window["coding"]["remaining_percent"], 100)
-        self.assertEqual(window["coding"]["window_seconds"], helper.WEEKLY_WINDOW_SECONDS)
+        self.assertEqual(
+            window["coding"]["window_seconds"], helper.WEEKLY_WINDOW_SECONDS
+        )
         self.assertEqual(window["coding"]["resets_at"], "2026-08-28T02:01:19Z")
 
     def test_picks_tighter_five_hour_window(self) -> None:
@@ -170,7 +174,9 @@ class MainTests(unittest.TestCase):
         payload = json.loads((FIXTURES / "usages-weekly.json").read_text())
         with (
             mock.patch.object(helper, "resolve_key", return_value=SYNTHETIC_KEY),
-            mock.patch.object(helper, "fetch_usages", return_value=helper.parse_usages(payload)),
+            mock.patch.object(
+                helper, "fetch_usages", return_value=helper.parse_usages(payload)
+            ),
             mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
             mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
         ):
@@ -179,7 +185,9 @@ class MainTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertNotIn(SYNTHETIC_KEY, stdout.getvalue())
         self.assertNotIn(SYNTHETIC_KEY, stderr.getvalue())
-        self.assertEqual(json.loads(stdout.getvalue())["coding"]["remaining_percent"], 100)
+        self.assertEqual(
+            json.loads(stdout.getvalue())["coding"]["remaining_percent"], 100
+        )
 
 
 if __name__ == "__main__":

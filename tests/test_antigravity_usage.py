@@ -65,7 +65,9 @@ class ParseTests(unittest.TestCase):
         window = helper.parse_quota_summary(payload)
 
         self.assertEqual(window["gemini"]["remaining_percent"], 80)
-        self.assertEqual(window["gemini"]["window_seconds"], helper.FIVE_HOUR_WINDOW_SECONDS)
+        self.assertEqual(
+            window["gemini"]["window_seconds"], helper.FIVE_HOUR_WINDOW_SECONDS
+        )
         self.assertEqual(window["gemini"]["resets_at"], "2026-08-22T14:10:41Z")
 
     def test_rejects_missing_gemini_group(self) -> None:
@@ -143,7 +145,11 @@ class FetchTests(unittest.TestCase):
         def opener(request, timeout):
             captured["url"] = request.full_url
             captured["csrf"] = next(
-                (value for _name, value in request.header_items() if "csrf" in _name.lower()),
+                (
+                    value
+                    for _name, value in request.header_items()
+                    if "csrf" in _name.lower()
+                ),
                 None,
             )
             captured["timeout"] = timeout
@@ -191,7 +197,9 @@ class MainTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertNotIn(SYNTHETIC_CSRF, stdout.getvalue())
         self.assertNotIn(SYNTHETIC_CSRF, stderr.getvalue())
-        self.assertEqual(json.loads(stdout.getvalue())["gemini"]["remaining_percent"], 42)
+        self.assertEqual(
+            json.loads(stdout.getvalue())["gemini"]["remaining_percent"], 42
+        )
 
 
 if __name__ == "__main__":
