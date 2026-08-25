@@ -1,5 +1,16 @@
 # Changelog
 
+## 3.8.0 - 2026-08-25
+
+### Added
+
+- `ag usage` now includes the existing Codex weekly quota reader. The new
+  read-only `--plan` projection classifies each provider as `unknown`,
+  `conserve`, `on_pace`, or `surplus` and caps any pull-forward recommendation
+  at one ready, verifiable task and one accepted artifact. Capacity does not
+  create demand. Planning uses a 5% pace tolerance to absorb rounded provider
+  data; routing thresholds are unchanged.
+
 ## 3.7.0 - 2026-08-22
 
 ### Added

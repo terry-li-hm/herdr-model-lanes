@@ -204,13 +204,25 @@ when unset. Install it as a symlink so updates are picked up:
 ln -s "$PWD/bin/ag" ~/.local/bin/ag
 ```
 
-`ag usage` prints one row per configured provider (Claude, Grok, GLM,
+`ag usage` prints one row per configured provider (Codex, Claude, Grok, GLM,
 Antigravity, Kimi Code, Cursor) with remaining percentage and reset
 countdown, reusing the same cached readers; `--json` emits a stable
 machine-readable object keyed by provider name, and `--refresh` bypasses
 each reader's cache. A failed provider prints `n/a` with its error without
 suppressing the others; the exit code is nonzero only if every provider
 fails or the invocation is invalid.
+
+`ag usage --plan` adds a read-only planning state to every row. `unknown`
+means the window is missing, stale, or expired. `conserve` means less than
+20% remains or capacity is more than 5% behind the window's pace. Planning
+uses this 5% tolerance to absorb rounded provider data. `surplus` means a
+window longer than 48 hours resets within 48 hours with at least 20% remaining
+and at least twice the required pace. Every other healthy window is `on_pace`.
+The routing health threshold remains unchanged.
+The summary may recommend pulling forward at most one ready, verifiable task,
+and stops after one accepted artifact. Capacity is not demand, so the command
+never recommends creating work merely to consume quota. With `--json --plan`,
+each provider includes `state` and the top level includes `recommendation`.
 
 Kill rule: if Herdr's plugin action log shows no `route` invocation in the
 two weeks after landing, delete the route action.
@@ -229,7 +241,7 @@ Cursor support additionally requires a signed-in Cursor.app session.
 Install the pinned release from GitHub:
 
 ```bash
-herdr plugin install terry-li-hm/herdr-model-lanes --ref v3.2.1
+herdr plugin install terry-li-hm/herdr-model-lanes --ref v3.8.0
 ```
 
 Then add the sidebar configuration above, run `herdr server reload-config`, and

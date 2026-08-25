@@ -67,6 +67,7 @@ CLASSES_FILENAME = "classes.toml"
 ROUTE_WINDOW_SECONDS = 604_800
 SURPLUS_HEALTH = 2.0
 SURPLUS_RESET_WINDOW_SECS = 48 * 3_600
+PLANNING_HEALTH_FLOOR = 0.95
 LANE_EXECUTABLES = {
     "claude": "claude",
     "pi": "pi",
@@ -1000,7 +1001,9 @@ def default_kimi_command() -> list[str]:
     return [sys.executable, str(Path(__file__).with_name("kimi_usage.py"))]
 
 
-def query_kimi(now: int | None = None, kimi_command: list[str] | None = None) -> KimiUsage:
+def query_kimi(
+    now: int | None = None, kimi_command: list[str] | None = None
+) -> KimiUsage:
     """Obtain normalized Kimi Code usage from the bundled helper subprocess."""
     if now is None:
         now = int(time.time())
@@ -1753,7 +1756,9 @@ def _route_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
         action="store_true",
         help="Hide lanes that are not classified-ok",
     )
-    parser.add_argument("--lane", metavar="NAME", help="Override the pick with this lane")
+    parser.add_argument(
+        "--lane", metavar="NAME", help="Override the pick with this lane"
+    )
     return parser
 
 
@@ -1771,7 +1776,7 @@ def _ag_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
             "  ag high\n"
             "  ag --classified\n"
             "  ag medium -y\n"
-            "  ag usage [--json] [--refresh]\n"
+            "  ag usage [--json] [--refresh] [--plan]\n"
             "\n"
             "Environment: AG_YES=1 skips the prompt; AG_TIMEOUT seconds until "
             "auto-accept (default 10)."
@@ -1811,7 +1816,9 @@ def build_parser() -> argparse.ArgumentParser:
         description="Show subscription capacity and route a model-class lane.",
     )
     sub = parser.add_subparsers(dest="command")
-    refresh_p = sub.add_parser("refresh", help="Refresh quota caches and publish the sidebar line")
+    refresh_p = sub.add_parser(
+        "refresh", help="Refresh quota caches and publish the sidebar line"
+    )
     refresh_p.add_argument(
         "--force",
         action="store_true",
@@ -1989,12 +1996,22 @@ def collect_usage(force: bool, state_dir: Path, now: int) -> list[UsageRow]:
     """Read each configured provider through its existing cached reader."""
     specs = (
         (
+            "codex",
+            "Cx",
+            lambda: True,
+            _refresh_codex,
+            CODEX_CACHE_FILENAME,
+            lambda usage: usage.weekly,
+            "codex",
+        ),
+        (
             "claude",
             "Cl",
             lambda: True,
             _refresh_claude,
             CLAUDE_CACHE_FILENAME,
             lambda usage: usage.weekly,
+            None,
         ),
         (
             "grok",
@@ -2003,6 +2020,7 @@ def collect_usage(force: bool, state_dir: Path, now: int) -> list[UsageRow]:
             _refresh_grok,
             GROK_CACHE_FILENAME,
             lambda usage: usage.weekly,
+            None,
         ),
         (
             "glm",
@@ -2011,6 +2029,7 @@ def collect_usage(force: bool, state_dir: Path, now: int) -> list[UsageRow]:
             _refresh_glm,
             GLM_CACHE_FILENAME,
             lambda usage: usage.five_hour,
+            None,
         ),
         (
             "antigravity",
@@ -2019,6 +2038,7 @@ def collect_usage(force: bool, state_dir: Path, now: int) -> list[UsageRow]:
             _refresh_antigravity,
             ANTIGRAVITY_CACHE_FILENAME,
             lambda usage: usage.gemini,
+            None,
         ),
         (
             "kimi",
@@ -2027,6 +2047,7 @@ def collect_usage(force: bool, state_dir: Path, now: int) -> list[UsageRow]:
             _refresh_kimi,
             KIMI_CACHE_FILENAME,
             lambda usage: usage.coding,
+            None,
         ),
         (
             "cursor",
@@ -2035,14 +2056,17 @@ def collect_usage(force: bool, state_dir: Path, now: int) -> list[UsageRow]:
             _refresh_cursor,
             CURSOR_CACHE_FILENAME,
             lambda usage: usage.monthly,
+            None,
         ),
     )
     rows = []
-    for name, label, configured, refresh_fn, cache_name, window_of in specs:
+    for name, label, configured, refresh_fn, cache_name, window_of, command in specs:
         if not configured():
             continue
         try:
-            usage, stale, error = refresh_fn(force, state_dir / cache_name, now, None)
+            usage, stale, error = refresh_fn(
+                force, state_dir / cache_name, now, command
+            )
         except Exception as exc:  # noqa: BLE001 - one reader's bug must not hide the others
             usage, stale, error = None, False, type(exc).__name__
         rows.append(
@@ -2057,14 +2081,59 @@ def collect_usage(force: bool, state_dir: Path, now: int) -> list[UsageRow]:
     return rows
 
 
+def usage_plan_state(row: UsageRow, now: int) -> str:
+    """Classify a quota row for read-only capacity planning."""
+    window = row.window
+    if (
+        row.stale
+        or window is None
+        or window.resets_at is None
+        or window.resets_at <= now
+    ):
+        return "unknown"
+    remaining = max(0, min(100, window.remaining_percent))
+    health = _lane_health(window, now)
+    if remaining < 20 or health is None or health < PLANNING_HEALTH_FLOOR:
+        return "conserve"
+    if (
+        window.window_seconds > SURPLUS_RESET_WINDOW_SECS
+        and window.resets_at - now <= SURPLUS_RESET_WINDOW_SECS
+        and health >= SURPLUS_HEALTH
+    ):
+        return "surplus"
+    return "on_pace"
+
+
+def _usage_recommendation(rows: list[UsageRow], now: int) -> str:
+    states = [(row, usage_plan_state(row, now)) for row in rows]
+    surplus_labels = [row.label for row, state in states if state == "surplus"]
+    if surplus_labels:
+        labels = ", ".join(surplus_labels)
+        return (
+            f"surplus {labels}: pull forward at most one ready, verifiable task; "
+            "stop after one accepted artifact"
+        )
+    if any(state == "on_pace" for _, state in states):
+        return (
+            "no expiring surplus; route ready work normally; do not pull work "
+            "forward for quota alone"
+        )
+    if any(state == "conserve" for _, state in states):
+        return "conserve available capacity; start no new quota-driven work"
+    return "quota state unavailable; do not make a quota-driven decision"
+
+
 def _usage_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ag usage",
         description=(
             "Print one row per configured provider with remaining percentage "
-            "and reset time. Providers: Claude, Grok, GLM, Antigravity, Kimi "
-            "Code, Cursor. A failed provider shows n/a with its error; the "
-            "exit code is nonzero only if every provider fails."
+            "and reset time. Providers: Codex, Claude, Grok, GLM, Antigravity, "
+            "Kimi Code, Cursor. A failed provider shows n/a with its error; the "
+            "exit code is nonzero only if every provider fails. --plan marks "
+            "each row unknown, conserve, on_pace, or surplus. Surplus may pull "
+            "forward at most one ready, verifiable task and stops after one "
+            "accepted artifact. Capacity is not demand."
         ),
         add_help=add_help,
     )
@@ -2079,11 +2148,16 @@ def _usage_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
         action="store_true",
         help="Bypass each reader's cache and query the provider now",
     )
+    parser.add_argument(
+        "--plan",
+        action="store_true",
+        help="Add planning states and a quota-capacity recommendation",
+    )
     return parser
 
 
 def usage_command(argv: list[str], now: int | None = None) -> int:
-    """``ag usage [--json] [--refresh]``: one row per configured provider."""
+    """``ag usage [--json] [--refresh] [--plan]``: provider quota rows."""
     parser = _usage_parser()
     try:
         args = parser.parse_args(argv)
@@ -2098,8 +2172,9 @@ def usage_command(argv: list[str], now: int | None = None) -> int:
         return 1
     rows = collect_usage(args.refresh, state_dir, now)
     if args.json_mode:
-        providers = {
-            row.name: {
+        providers = {}
+        for row in rows:
+            provider = {
                 "remaining_percent": (
                     row.window.remaining_percent if row.window is not None else None
                 ),
@@ -2107,16 +2182,30 @@ def usage_command(argv: list[str], now: int | None = None) -> int:
                 "stale": row.stale,
                 "error": row.error,
             }
-            for row in rows
-        }
-        print(json.dumps({"providers": providers}, indent=2))
+            if args.plan:
+                provider["state"] = usage_plan_state(row, now)
+            providers[row.name] = provider
+        payload = {"providers": providers}
+        if args.plan:
+            payload["recommendation"] = _usage_recommendation(rows, now)
+        print(json.dumps(payload, indent=2))
     else:
         for row in rows:
+            state = usage_plan_state(row, now) if args.plan else None
             if row.window is not None:
-                print(_format_window(row.label, row.window, now, row.stale))
+                line = _format_window(row.label, row.window, now, row.stale)
+            elif state is not None:
+                line = f"{row.label} n/a"
             else:
                 detail = f" ({row.error})" if row.error else ""
-                print(f"{row.label} n/a{detail}")
+                line = f"{row.label} n/a{detail}"
+            if state is not None:
+                line += f" [{state}]"
+                if row.error:
+                    line += f" ({row.error})"
+            print(line)
+        if args.plan:
+            print(_usage_recommendation(rows, now))
     if all(row.window is None for row in rows):
         return 1
     return 0
