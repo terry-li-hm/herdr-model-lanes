@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Linux Claude Max quota support in `claude_max_usage.py`: the helper now
+  reads the same `claudeAiOauth` payload from
+  `CLAUDE_CONFIG_DIR/.credentials.json` (or `~/.claude/.credentials.json`)
+  when `sys.platform` is Linux. The read is bounded to 64 KiB and refuses
+  symlinks, non-regular files, files owned by another effective user, and
+  group/world permission bits. macOS Keychain behavior, expiry checks,
+  redirect rejection, and normalized output are unchanged. Any other platform
+  fails clearly and shows `Cl n/a`.
+
 ## 3.8.0 - 2026-08-25
 
 ### Added

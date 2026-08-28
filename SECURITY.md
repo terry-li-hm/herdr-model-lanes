@@ -3,8 +3,9 @@
 ## Trust model and credential boundary
 
 This plugin is credential-blind. `herdr_model_lanes.py` never reads the macOS
-Keychain, never constructs an `Authorization` header, and never sees an OAuth
-or CSRF token. It queries the local Codex app-server over stdio and runs one
+Keychain or the Linux Claude credentials file, never constructs an
+`Authorization` header, and never sees an OAuth or CSRF token. It queries the
+local Codex app-server over stdio and runs one
 bounded helper subprocess per provider that needs credentials.
 
 `claude_max_usage.py` is the sole credential boundary. On macOS it:
@@ -19,6 +20,13 @@ bounded helper subprocess per provider that needs credentials.
 - prints only the normalized `five_hour`, `seven_day`, and `seven_day_sonnet`
   windows and discards every other response field.
 
+On Linux, the same helper resolves `CLAUDE_CONFIG_DIR` (or `~/.claude`) and
+reads `.credentials.json` instead of the Keychain. The read is opened without
+following symlinks, bounded to 64 KiB, and refuses non-regular files, files
+owned by another effective user, and files with group or world permission
+bits. The payload, parser, expiry checks, single-request usage call, redirect
+refusal, and normalized output are identical to macOS.
+
 The OAuth token is never placed in argv, logs, caches, stdout errors,
 exception messages, or files. Error messages name failure types and exit
 codes only; they never echo Keychain output, HTTP bodies, or tokens. Caches
@@ -29,7 +37,8 @@ timestamps only.
 
 The Anthropic OAuth usage endpoint is undocumented. It is not a public,
 versioned API and may change or stop working without notice. Claude support is
-therefore experimental and macOS-only. If it breaks, the plugin degrades to
+therefore experimental, available on macOS (Keychain) and Linux (credentials
+file). If it breaks, the plugin degrades to
 `Cl n/a` and keeps reporting Codex, which is official and cross-platform.
 
 ## Reporting a vulnerability
@@ -37,7 +46,7 @@ therefore experimental and macOS-only. If it breaks, the plugin degrades to
 Please open a private security advisory on this repository (GitHub:
 Security tab -> Report a vulnerability) rather than a public issue. Include
 the affected commit and a reproduction. Do not include real OAuth tokens,
-Keychain dumps, or account credentials in a report.
+Keychain dumps, credential files, or account credentials in a report.
 
 ## Scope
 

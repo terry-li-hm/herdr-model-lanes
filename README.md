@@ -26,16 +26,22 @@ does not read `auth.json` or Codex transcripts. Codex support is
 credential-blind and cross-platform.
 
 Claude Max usage comes from the bundled `claude_max_usage.py` helper in this
-repository. **Claude support is experimental and macOS-only.** The helper is
-the sole credential boundary: on macOS it reads the Claude Code OAuth token
-from the login Keychain and calls
+repository. **Claude support is experimental.** The helper is the sole
+credential boundary. On macOS it reads the Claude Code OAuth token from the
+login Keychain. On Linux it reads the same `claudeAiOauth` payload from
+`CLAUDE_CONFIG_DIR/.credentials.json`, or `~/.claude/.credentials.json` when
+the variable is unset. The Linux read is bounded to 64 KiB and refuses
+symlinks, non-regular files, files owned by another effective user, and files
+with group or world permission bits. On any other platform the helper fails
+clearly and Claude shows `n/a`. The helper then calls
 `https://api.anthropic.com/api/oauth/usage`. That endpoint is **undocumented
 and unofficial**; it may change or disappear without notice. The main plugin
 is credential-blind: it runs the helper as a bounded subprocess and receives
 only the normalized `five_hour`, `seven_day`, and `seven_day_sonnet` windows.
-No OAuth token or Keychain value is ever placed in argv, logs, caches, error
-messages, or files. Where the helper cannot run (Linux, a locked Keychain, or
-a signed-out session), Claude displays as `Cl n/a` while Codex keeps working.
+No OAuth token or credential file value is ever placed in argv, logs, caches,
+error messages, or files. Where the helper cannot run (an unsupported
+platform, a locked Keychain, a missing or insecure credentials file, or a
+signed-out session), Claude displays as `Cl n/a` while Codex keeps working.
 
 Grok quota comes from the bundled `grok_usage.py` helper in the same shape.
 It is the sole credential boundary for Grok: it reads the login key from the
@@ -230,7 +236,9 @@ two weeks after landing, delete the route action.
 ## Installation
 
 Requirements: Python 3.11+, Herdr 0.8+, and `codex` on `PATH`. Claude support
-additionally requires macOS with the Claude Code CLI signed in. Grok support
+additionally requires macOS with the Claude Code CLI signed in, or Linux with
+a `~/.claude/.credentials.json` (or `CLAUDE_CONFIG_DIR` equivalent) owned by
+the current user with `0600`-style permissions. Grok support
 additionally requires a Grok CLI login under `~/.grok`. GLM support
 additionally requires a Z.ai/BigModel API key from one of the sources above.
 Antigravity support additionally requires Antigravity.app or `agy` already
@@ -264,7 +272,9 @@ credentials; deleting that directory removes every trace.
 
 - The Anthropic usage endpoint is unofficial and may break at any time; Claude
   numbers are best-effort and experimental.
-- Claude usage requires macOS because the token lives in the macOS Keychain.
+- Claude usage requires macOS (Keychain) or Linux (`CLAUDE_CONFIG_DIR` or
+  `~/.claude` credentials file with owner-only permissions); other platforms
+  show `n/a`.
 - Codex, Claude, Grok, GLM, Antigravity, Kimi Code, and Cursor are the
   supported quota providers. Antigravity quota is available only while
   Antigravity.app or `agy` is already running. Kimi Code uses the coding
@@ -290,8 +300,8 @@ ag --explain
 ag            # execs the chosen lane in this shell
 ```
 
-The Claude Max reader is macOS-only (Keychain); on Linux the Claude lanes show
-`n/a` and rank last, while Codex, Grok, GLM, and Antigravity lanes route
-normally when their sources are present.
+The Claude Max reader works on macOS (Keychain) and Linux (credentials file);
+elsewhere the Claude lanes show `n/a` and rank last, while Codex, Grok, GLM,
+and Antigravity lanes route normally when their sources are present.
 
 Surplus applies only to windows longer than 48 hours; a five-hour window (GLM) always resets soon and refills anyway, so it never overrides class order on surplus alone.

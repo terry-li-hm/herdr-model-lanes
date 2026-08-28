@@ -1,4 +1,6 @@
 import json
+import os
+import tempfile
 import unittest
 import urllib.request
 from pathlib import Path
@@ -38,7 +40,7 @@ class CredentialParsingTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            helper.parse_keychain_payload(payload, NOW_MS), SYNTHETIC_TOKEN
+            helper.parse_credential_payload(payload, NOW_MS), SYNTHETIC_TOKEN
         )
 
     def test_rejects_expired_or_malformed_credentials_without_echoing_payload(
@@ -54,7 +56,7 @@ class CredentialParsingTests(unittest.TestCase):
         )
         for payload in (expired, SYNTHETIC_TOKEN):
             with self.assertRaises(helper.UsageHelperError) as raised:
-                helper.parse_keychain_payload(payload, NOW_MS)
+                helper.parse_credential_payload(payload, NOW_MS)
             self.assertNotIn(SYNTHETIC_TOKEN, str(raised.exception))
 
 
@@ -77,7 +79,7 @@ class KeychainTests(unittest.TestCase):
         )
 
         oauth_value = helper.read_oauth_token(
-            now_ms=NOW_MS, security_bin="/usr/bin/security"
+            now_ms=NOW_MS, security_bin="/usr/bin/security", platform="darwin"
         )
 
         self.assertEqual(oauth_value, SYNTHETIC_TOKEN)
@@ -105,7 +107,7 @@ class KeychainTests(unittest.TestCase):
         )
 
         with self.assertRaises(helper.UsageHelperError) as raised:
-            helper.read_oauth_token(now_ms=NOW_MS)
+            helper.read_oauth_token(now_ms=NOW_MS, platform="darwin")
 
         self.assertNotIn(SYNTHETIC_TOKEN, str(raised.exception))
 
@@ -207,6 +209,176 @@ class FetchTests(unittest.TestCase):
         self.assertNotIn(SYNTHETIC_TOKEN, str(raised.exception))
 
 
+def _write_credentials(directory: str, token: str, expires_in_ms: int = 60_000) -> str:
+    path = os.path.join(directory, ".credentials.json")
+    payload = json.dumps(
+        {
+            "claudeAiOauth": {
+                "accessToken": token,
+                "expiresAt": NOW_MS + expires_in_ms,
+            }
+        }
+    )
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(payload)
+    os.chmod(path, 0o600)
+    return path
+
+
+class LinuxCredentialsPathTests(unittest.TestCase):
+    def test_custom_config_dir_is_preferred_over_home(self) -> None:
+        self.assertEqual(
+            helper.credentials_path("/custom/dir"),
+            os.path.join("/custom/dir", ".credentials.json"),
+        )
+
+    def test_env_var_then_home_default(self) -> None:
+        with mock.patch.dict(
+            os.environ, {"CLAUDE_CONFIG_DIR": "/env/claude"}, clear=False
+        ):
+            self.assertEqual(helper.credentials_path(), "/env/claude/.credentials.json")
+        environ = {
+            key: value
+            for key, value in os.environ.items()
+            if key != "CLAUDE_CONFIG_DIR"
+        }
+        with mock.patch("os.environ", environ):
+            self.assertEqual(
+                helper.credentials_path(),
+                os.path.join(os.path.expanduser("~"), ".claude", ".credentials.json"),
+            )
+
+
+class LinuxCredentialsFileTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.directory = self._tmp.name
+        self.path = _write_credentials(self.directory, SYNTHETIC_TOKEN)
+
+    def test_secure_read_returns_live_token(self) -> None:
+        extracted = helper.read_credentials_file(self.path, now_ms=NOW_MS)
+        self.assertEqual(extracted, SYNTHETIC_TOKEN)
+
+    def test_read_via_dispatch_reads_default_path(self) -> None:
+        extracted = helper.read_oauth_token(
+            now_ms=NOW_MS,
+            config_dir=self.directory,
+            platform="linux",
+        )
+        self.assertEqual(extracted, SYNTHETIC_TOKEN)
+
+    def test_oversize_file_is_refused(self) -> None:
+        with open(self.path, "r+b") as handle:
+            handle.truncate(helper.MAX_CREDENTIALS_BYTES + 1)
+        with self.assertRaises(helper.UsageHelperError) as raised:
+            helper.read_credentials_file(self.path, now_ms=NOW_MS)
+        self.assertIn("64 KiB", str(raised.exception))
+
+    def test_symlink_is_refused(self) -> None:
+        link = os.path.join(self.directory, "link.json")
+        os.symlink(self.path, link)
+        with self.assertRaises(helper.UsageHelperError) as raised:
+            helper.read_credentials_file(link, now_ms=NOW_MS)
+        self.assertNotIn(SYNTHETIC_TOKEN, str(raised.exception))
+
+    def test_non_regular_file_is_refused(self) -> None:
+        if os.path.exists("/dev/null") is False:
+            self.skipTest("no /dev/null")
+        with self.assertRaises(helper.UsageHelperError):
+            helper.read_credentials_file("/dev/null", now_ms=NOW_MS)
+
+    def test_wrong_owner_is_refused_when_root_not_in_effect(self) -> None:
+        info = os.stat(self.path)
+        if info.st_uid == 0 and os.geteuid() != 0:
+            fake = os.stat(self.path)
+            with (
+                mock.patch("os.fstat", return_value=fake),
+                mock.patch("os.geteuid", return_value=info.st_uid + 1),
+            ):
+                with self.assertRaises(helper.UsageHelperError) as raised:
+                    helper.read_credentials_file(self.path, now_ms=NOW_MS)
+                self.assertIn("owned", str(raised.exception))
+        else:
+            fake = type(info)(
+                (
+                    info.st_mode,
+                    info.st_ino,
+                    info.st_dev,
+                    info.st_nlink,
+                    info.st_uid + 1,
+                    info.st_gid,
+                    info.st_size,
+                    info.st_atime,
+                    info.st_mtime,
+                    info.st_ctime,
+                )
+            )
+            with mock.patch("os.fstat", return_value=fake):
+                with self.assertRaises(helper.UsageHelperError) as raised:
+                    helper.read_credentials_file(self.path, now_ms=NOW_MS)
+                self.assertIn("owned", str(raised.exception))
+
+    def test_group_or_world_permissions_are_refused(self) -> None:
+        for mode in (0o640, 0o604, 0o666):
+            with self.subTest(mode=oct(mode)):
+                os.chmod(self.path, mode)
+                with self.assertRaises(helper.UsageHelperError) as raised:
+                    helper.read_credentials_file(self.path, now_ms=NOW_MS)
+                self.assertIn("accessible", str(raised.exception))
+
+    def test_malformed_payload_never_echoes_contents(self) -> None:
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write(f"{{not json with {SYNTHETIC_TOKEN}")
+        with self.assertRaises(helper.UsageHelperError) as raised:
+            helper.read_credentials_file(self.path, now_ms=NOW_MS)
+        self.assertNotIn(SYNTHETIC_TOKEN, str(raised.exception))
+
+    def test_expired_payload_is_refused_without_echoing_token(self) -> None:
+        _write_credentials(self.directory, SYNTHETIC_TOKEN, expires_in_ms=-1)
+        with self.assertRaises(helper.UsageHelperError) as raised:
+            helper.read_credentials_file(self.path, now_ms=NOW_MS)
+        self.assertIn("expired", str(raised.exception))
+        self.assertNotIn(SYNTHETIC_TOKEN, str(raised.exception))
+
+
+class PlatformDispatchTests(unittest.TestCase):
+    @mock.patch("claude_max_usage.subprocess.run")
+    def test_macos_dispatch_uses_keychain(self, run: mock.Mock) -> None:
+        run.return_value = mock.Mock(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "claudeAiOauth": {
+                        "accessToken": SYNTHETIC_TOKEN,
+                        "expiresAt": NOW_MS + 60_000,
+                    }
+                }
+            ),
+            stderr="",
+        )
+
+        extracted = helper.read_oauth_token(
+            now_ms=NOW_MS, security_bin="/usr/bin/security", platform="darwin"
+        )
+
+        self.assertEqual(extracted, SYNTHETIC_TOKEN)
+        self.assertEqual(run.call_args.args[0][0], "/usr/bin/security")
+
+    def test_unsupported_platform_fails_clearly(self) -> None:
+        with self.assertRaises(helper.UsageHelperError) as raised:
+            helper.read_oauth_token(now_ms=NOW_MS, platform="win32")
+        self.assertIn("unsupported platform", str(raised.exception))
+
+    def test_linux_dispatch_honors_custom_config_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            _write_credentials(directory, SYNTHETIC_TOKEN)
+            extracted = helper.read_oauth_token(
+                now_ms=NOW_MS, config_dir=directory, platform="linux"
+            )
+        self.assertEqual(extracted, SYNTHETIC_TOKEN)
+
+
 class PublicSurfaceTests(unittest.TestCase):
     def test_repository_has_public_release_scaffolding_and_no_internal_task_file(
         self,
@@ -225,6 +397,24 @@ class PublicSurfaceTests(unittest.TestCase):
         self.assertNotIn("Authorization", plugin)
         self.assertIn("find-generic-password", helper_source)
         self.assertIn("Authorization", helper_source)
+
+    def test_main_plugin_is_credential_blind_on_linux_too(self) -> None:
+        plugin = Path("herdr_model_lanes.py").read_text()
+
+        self.assertNotIn("CLAUDE_CONFIG_DIR", plugin)
+        self.assertNotIn(".credentials.json", plugin)
+        self.assertNotIn("/.claude", plugin)
+
+    def test_security_policy_and_manifest_no_longer_claim_macos_only(self) -> None:
+        security = Path("SECURITY.md").read_text()
+        manifest = Path("herdr-plugin.toml").read_text()
+
+        for document in (security, manifest):
+            self.assertNotIn("macOS-only", document)
+            self.assertNotIn("macos-only", document)
+        self.assertIn("CLAUDE_CONFIG_DIR", security)
+        self.assertIn("macos", manifest)
+        self.assertIn("linux", manifest)
 
 
 if __name__ == "__main__":
