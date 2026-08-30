@@ -4,6 +4,29 @@
 
 ### Added
 
+- Claude Max usage now comes primarily from the documented Claude Code
+  `statusLine` feed. The new `claude_statusline.py` collector (launched via
+  `bin/claude-statusline`) reads at most 1 MiB of status-line JSON from
+  stdin, persists only `captured_at` plus the normalized `five_hour` and
+  `seven_day` windows (the documented `used_percentage` normalized to
+  `utilization`, plus reset epoch; a payload without a valid live
+  `seven_day` window never overwrites a prior cache) to
+  `claude-statusline.json` in the plugin state directory with the same
+  `HERDR_PLUGIN_STATE_DIR`/`MODEL_LANES_STATE_DIR`/`XDG_STATE_HOME`
+  precedence as `ag`, atomically at mode `0600`, and forwards the original
+  stdin bytes to any argv after `--` without a shell and with a short
+  timeout (one second; a cache write failure emits one fixed warning and
+  never suppresses the downstream command or rendered line), preserving
+  downstream stdout on success. Reset epochs more than one year ahead are
+  rejected in both collector and reader. Sensitive input fields
+  (`session_id`, `model`, `cwd`, transcript paths, prompts) are never
+  persisted. `claude_max_usage.py` reads this cache before any credential or
+  network access and uses it while `captured_at` is no more than 30 minutes
+  old and the weekly window is live, dropping an expired `five_hour` window
+  independently; `--refresh` does not bypass a valid cache. Missing, stale,
+  malformed, or expired caches fall back to the existing credential plus
+  undocumented OAuth endpoint unchanged.
+
 - Linux Claude Max quota support in `claude_max_usage.py`: the helper now
   reads the same `claudeAiOauth` payload from
   `CLAUDE_CONFIG_DIR/.credentials.json` (or `~/.claude/.credentials.json`)

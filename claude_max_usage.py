@@ -12,6 +12,7 @@ exception messages, or files.
 from __future__ import annotations
 
 import json
+import math
 import os
 import stat
 import subprocess
@@ -19,6 +20,7 @@ import sys
 import time
 import urllib.request
 from collections.abc import Callable
+from datetime import UTC, datetime
 
 PLUGIN_VERSION = "2.2.0"
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
@@ -30,6 +32,11 @@ CREDENTIALS_FILENAME = ".credentials.json"
 MAX_CREDENTIALS_BYTES = 64 * 1024
 USER_AGENT = f"herdr-model-lanes/{PLUGIN_VERSION} (Claude Max usage helper)"
 NORMALIZED_WINDOWS = ("five_hour", "seven_day", "seven_day_sonnet")
+STATUSLINE_PLUGIN_ID_PATH = "herdr/plugins/terry.herdr-model-lanes"
+STATUSLINE_CACHE_FILENAME = "claude-statusline.json"
+STATUSLINE_CACHE_MAX_AGE_SECS = 30 * 60
+STATUSLINE_CACHE_MAX_BYTES = 64 * 1024
+MAX_RESET_AHEAD_SECS = 365 * 24 * 60 * 60
 
 
 class UsageHelperError(Exception):
@@ -53,6 +60,8 @@ def parse_credential_payload(payload: str, now_ms: int) -> str:
         raise UsageHelperError("Credential payload has no access token")
     if not isinstance(expires_at, (int, float)) or isinstance(expires_at, bool):
         raise UsageHelperError("Credential payload has no expiry timestamp")
+    if not math.isfinite(expires_at):
+        raise UsageHelperError("Credential payload has an invalid expiry timestamp")
     if expires_at <= now_ms:
         raise UsageHelperError("Claude OAuth token has expired; sign in again")
     return token
@@ -217,9 +226,131 @@ def fetch_usage(
     }
 
 
-def main() -> int:
-    """Print the normalized quota windows, or a credential-free error."""
+def statusline_cache_path() -> str:
+    """Resolve the status-line cache path with the same precedence as ``ag``."""
+    base = os.environ.get("HERDR_PLUGIN_STATE_DIR") or os.environ.get(
+        "MODEL_LANES_STATE_DIR"
+    )
+    if base:
+        return os.path.join(base, STATUSLINE_CACHE_FILENAME)
+    xdg = os.environ.get("XDG_STATE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".local", "state"
+    )
+    return os.path.join(xdg, STATUSLINE_PLUGIN_ID_PATH, STATUSLINE_CACHE_FILENAME)
+
+
+def _read_cache_file(path: str) -> bytes | None:
+    """Bounded, symlink-refusing cache read; failures never echo contents."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
+        fd = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return None
+        chunks: list[bytes] = []
+        remaining = STATUSLINE_CACHE_MAX_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(remaining, 8192))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        if len(payload) > STATUSLINE_CACHE_MAX_BYTES:
+            return None
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    return payload
+
+
+def _is_finite_number(value: object) -> bool:
+    """True for a non-bool int/float that is neither NaN nor infinity."""
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
+def _cache_window(value: object, now: int) -> dict | None:
+    """Validate one cached window; return the helper shape or None."""
+    if not isinstance(value, dict):
+        return None
+    utilization = value.get("utilization")
+    if not _is_finite_number(utilization) or not 0 <= utilization <= 100:
+        return None
+    resets_at = value.get("resets_at")
+    if (
+        not _is_finite_number(resets_at)
+        or resets_at <= 0
+        or int(resets_at) <= now
+        or resets_at > now + MAX_RESET_AHEAD_SECS
+    ):
+        return None
+    return {
+        "utilization": utilization,
+        "resets_at": datetime.fromtimestamp(int(resets_at), UTC).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        ),
+    }
+
+
+def load_statusline_usage(now: int | None = None) -> dict | None:
+    """Return the cached official windows, or None when unusable.
+
+    The cache is used only when ``captured_at`` is no more than 30 minutes
+    old and the ``seven_day`` window is still live; an expired ``five_hour``
+    window is dropped independently. Output matches the helper shape with
+    ``seven_day_sonnet`` absent.
+    """
+    if now is None:
+        now = int(time.time())
+    payload = _read_cache_file(statusline_cache_path())
+    if payload is None:
+        return None
+    try:
+        document = json.loads(payload.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    captured_at = document.get("captured_at")
+    if not _is_finite_number(captured_at) or captured_at <= 0:
+        return None
+    age = now - int(captured_at)
+    if age > STATUSLINE_CACHE_MAX_AGE_SECS or age < -60:
+        return None
+    seven_day = _cache_window(document.get("seven_day"), now)
+    if seven_day is None:
+        return None
+    return {
+        "five_hour": _cache_window(document.get("five_hour"), now),
+        "seven_day": seven_day,
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Print normalized quota windows, or a credential-free error.
+
+    The official status-line cache is checked first, before any credential
+    or network access; ``--refresh`` does not bypass a valid cache because
+    the point is avoiding endpoint calls.
+    """
+    args = sys.argv[1:] if argv is None else list(argv)
+    for arg in args:
+        if arg != "--refresh":
+            print(f"usage: {sys.argv[0]} [--refresh]", file=sys.stderr)
+            return 2
+    try:
+        cached = load_statusline_usage()
+        if cached is not None:
+            print(json.dumps(cached))
+            return 0
         windows = fetch_usage(read_oauth_token(), timeout=FETCH_TIMEOUT_SECS)
     except UsageHelperError as exc:
         print(f"claude usage error: {exc}", file=sys.stderr)

@@ -25,15 +25,33 @@ API-key authentication rather than presenting it as subscription usage. It
 does not read `auth.json` or Codex transcripts. Codex support is
 credential-blind and cross-platform.
 
-Claude Max usage comes from the bundled `claude_max_usage.py` helper in this
-repository. **Claude support is experimental.** The helper is the sole
-credential boundary. On macOS it reads the Claude Code OAuth token from the
+Claude Max usage comes primarily from the documented Claude Code
+`statusLine` feed, captured by the bundled `claude_statusline.py`
+collector. Configure Claude Code's `statusLine` command to
+`bin/claude-statusline` (or `python3 claude_statusline.py`); any command
+placed after `--` in that setting receives the original stdin JSON with
+its stdout preserved, so an existing status-line script keeps working.
+The collector reads at most 1 MiB of the status-line JSON and persists only
+`captured_at` plus the normalized `five_hour` and `seven_day` windows
+(the documented `used_percentage` normalized to `utilization`, plus the
+reset epoch) under
+`HERDR_PLUGIN_STATE_DIR`/`MODEL_LANES_STATE_DIR`/`XDG_STATE_HOME` at
+`herdr/plugins/terry.herdr-model-lanes/claude-statusline.json`, written
+atomically with mode `0600`. `session_id`, `model`, `cwd`, transcript
+paths, and prompt data are never persisted. The bundled
+`claude_max_usage.py` helper reads this cache before any credential or
+network access and uses it while `captured_at` is no more than 30 minutes
+old and the weekly window has not expired; `--refresh` does not bypass a
+valid cache. **Claude support is experimental.** When the cache is missing,
+stale, malformed, or expired, the helper falls back to the undocumented
+OAuth endpoint. It is the sole credential boundary: on macOS it reads the
+Claude Code OAuth token from the
 login Keychain. On Linux it reads the same `claudeAiOauth` payload from
 `CLAUDE_CONFIG_DIR/.credentials.json`, or `~/.claude/.credentials.json` when
 the variable is unset. The Linux read is bounded to 64 KiB and refuses
 symlinks, non-regular files, files owned by another effective user, and files
 with group or world permission bits. On any other platform the helper fails
-clearly and Claude shows `n/a`. The helper then calls
+clearly and Claude shows `n/a`. As a fallback the helper calls
 `https://api.anthropic.com/api/oauth/usage`. That endpoint is **undocumented
 and unofficial**; it may change or disappear without notice. The main plugin
 is credential-blind: it runs the helper as a bounded subprocess and receives
@@ -42,6 +60,8 @@ No OAuth token or credential file value is ever placed in argv, logs, caches,
 error messages, or files. Where the helper cannot run (an unsupported
 platform, a locked Keychain, a missing or insecure credentials file, or a
 signed-out session), Claude displays as `Cl n/a` while Codex keeps working.
+With the statusLine feed configured, the endpoint fallback rarely runs and
+Claude numbers track the same data Claude Code itself displays.
 
 Grok quota comes from the bundled `grok_usage.py` helper in the same shape.
 It is the sole credential boundary for Grok: it reads the login key from the
@@ -235,8 +255,10 @@ two weeks after landing, delete the route action.
 
 ## Installation
 
-Requirements: Python 3.11+, Herdr 0.8+, and `codex` on `PATH`. Claude support
-additionally requires macOS with the Claude Code CLI signed in, or Linux with
+Requirements: Python 3.11+, Herdr 0.8+, and `codex` on `PATH`. Claude usage prefers the Claude Code `statusLine` feed — set
+Claude Code's `statusLine` command to `bin/claude-statusline` from this
+repository; the endpoint fallback additionally requires macOS with the
+Claude Code CLI signed in, or Linux with
 a `~/.claude/.credentials.json` (or `CLAUDE_CONFIG_DIR` equivalent) owned by
 the current user with `0600`-style permissions. Grok support
 additionally requires a Grok CLI login under `~/.grok`. GLM support
@@ -270,8 +292,9 @@ credentials; deleting that directory removes every trace.
 
 ## Limitations
 
-- The Anthropic usage endpoint is unofficial and may break at any time; Claude
-  numbers are best-effort and experimental.
+- Claude numbers come primarily from the Claude Code `statusLine` feed and
+  fall back to an unofficial Anthropic endpoint that may break at any time;
+  Claude numbers remain best-effort and experimental.
 - Claude usage requires macOS (Keychain) or Linux (`CLAUDE_CONFIG_DIR` or
   `~/.claude` credentials file with owner-only permissions); other platforms
   show `n/a`.

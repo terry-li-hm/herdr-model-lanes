@@ -1,6 +1,8 @@
+import io
 import json
 import os
 import tempfile
+import time
 import unittest
 import urllib.request
 from pathlib import Path
@@ -58,6 +60,21 @@ class CredentialParsingTests(unittest.TestCase):
             with self.assertRaises(helper.UsageHelperError) as raised:
                 helper.parse_credential_payload(payload, NOW_MS)
             self.assertNotIn(SYNTHETIC_TOKEN, str(raised.exception))
+
+    def test_rejects_non_finite_credential_expiry(self) -> None:
+        for expires_at in (float("inf"), float("-inf"), float("nan")):
+            with self.subTest(expires_at=expires_at):
+                payload = json.dumps(
+                    {
+                        "claudeAiOauth": {
+                            "accessToken": SYNTHETIC_TOKEN,
+                            "expiresAt": expires_at,
+                        }
+                    }
+                )
+                with self.assertRaises(helper.UsageHelperError) as raised:
+                    helper.parse_credential_payload(payload, NOW_MS)
+                self.assertNotIn(SYNTHETIC_TOKEN, str(raised.exception))
 
 
 class KeychainTests(unittest.TestCase):
@@ -415,6 +432,257 @@ class PublicSurfaceTests(unittest.TestCase):
         self.assertIn("CLAUDE_CONFIG_DIR", security)
         self.assertIn("macos", manifest)
         self.assertIn("linux", manifest)
+
+
+class StatuslineCachePathTests(unittest.TestCase):
+    def _env(self, **overrides) -> dict:
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key
+            not in ("HERDR_PLUGIN_STATE_DIR", "MODEL_LANES_STATE_DIR", "XDG_STATE_HOME")
+        }
+        env.update({k: v for k, v in overrides.items() if v is not None})
+        return env
+
+    def test_same_precedence_as_ag(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            self._env(
+                HERDR_PLUGIN_STATE_DIR="/state/a",
+                MODEL_LANES_STATE_DIR="/state/b",
+                XDG_STATE_HOME="/state/c",
+            ),
+        ):
+            self.assertEqual(
+                helper.statusline_cache_path(),
+                os.path.join("/state/a", "claude-statusline.json"),
+            )
+        with mock.patch.dict(
+            os.environ,
+            self._env(MODEL_LANES_STATE_DIR="/state/b", XDG_STATE_HOME="/state/c"),
+        ):
+            self.assertEqual(
+                helper.statusline_cache_path(),
+                os.path.join("/state/b", "claude-statusline.json"),
+            )
+        with mock.patch.dict(os.environ, self._env(XDG_STATE_HOME="/state/c")):
+            self.assertEqual(
+                helper.statusline_cache_path(),
+                os.path.join(
+                    "/state/c",
+                    "herdr/plugins/terry.herdr-model-lanes",
+                    "claude-statusline.json",
+                ),
+            )
+        with mock.patch.dict(os.environ, self._env()):
+            self.assertEqual(
+                helper.statusline_cache_path(),
+                os.path.join(
+                    os.path.expanduser("~"),
+                    ".local/state/herdr/plugins/terry.herdr-model-lanes",
+                    "claude-statusline.json",
+                ),
+            )
+
+
+class StatuslineCacheTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.NOW = int(time.time())
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key != "HERDR_PLUGIN_STATE_DIR"
+        }
+        env["HERDR_PLUGIN_STATE_DIR"] = self._tmp.name
+        patcher = mock.patch.dict(os.environ, env)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.path = os.path.join(self._tmp.name, "claude-statusline.json")
+
+    def _write_cache(
+        self, captured_at: int, five_hour: object, seven_day: object
+    ) -> None:
+        with open(self.path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "captured_at": captured_at,
+                    "five_hour": five_hour,
+                    "seven_day": seven_day,
+                },
+                handle,
+            )
+
+    def test_fresh_cache_short_circuits_before_token_or_network(self) -> None:
+        self._write_cache(
+            self.NOW - 60,
+            {"utilization": 42, "resets_at": self.NOW + 1800},
+            {"utilization": 80, "resets_at": self.NOW + 86400},
+        )
+
+        with mock.patch(
+            "claude_max_usage.read_oauth_token",
+            side_effect=AssertionError("credential access must not happen"),
+        ):
+            result = helper.load_statusline_usage(now=self.NOW)
+
+        self.assertEqual(result["seven_day"]["utilization"], 80)
+        self.assertEqual(result["five_hour"]["utilization"], 42)
+        self.assertNotIn("seven_day_sonnet", result)
+        self.assertTrue(result["seven_day"]["resets_at"].endswith("Z"))
+
+    def test_main_uses_cache_without_credentials_or_refresh_bypass(self) -> None:
+        self._write_cache(
+            self.NOW - 60,
+            None,
+            {"utilization": 80, "resets_at": self.NOW + 86400},
+        )
+        captured = {}
+
+        def fail(name):
+            def _fail(*_args, **_kwargs):
+                captured[name] = True
+                raise AssertionError(f"{name} must not be reached")
+
+            return _fail
+
+        with (
+            mock.patch("claude_max_usage.read_oauth_token", side_effect=fail("token")),
+            mock.patch("claude_max_usage.fetch_usage", side_effect=fail("network")),
+            mock.patch("sys.stdout", new_callable=lambda: io.StringIO()) as out,
+        ):
+            for argv in ([], ["--refresh"]):
+                with self.subTest(argv=argv):
+                    rc = helper.main(list(argv))
+                    self.assertEqual(rc, 0)
+                    payload = json.loads(out.getvalue())
+                    self.assertEqual(set(payload), {"five_hour", "seven_day"})
+                    out.truncate(0)
+                    out.seek(0)
+        self.assertEqual(captured, {})
+
+    def test_main_rejects_unknown_arguments(self) -> None:
+        with mock.patch("sys.stderr", new_callable=lambda: io.StringIO()):
+            rc = helper.main(["--bogus"])
+        self.assertEqual(rc, 2)
+
+    def test_stale_cache_falls_back_to_endpoint(self) -> None:
+        self._write_cache(
+            self.NOW - helper.STATUSLINE_CACHE_MAX_AGE_SECS - 1,
+            {"utilization": 42, "resets_at": self.NOW + 3600},
+            {"utilization": 80, "resets_at": self.NOW + 86400},
+        )
+
+        self.assertIsNone(helper.load_statusline_usage(now=self.NOW))
+
+    def test_malformed_or_missing_cache_falls_back(self) -> None:
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write("{not json")
+        self.assertIsNone(helper.load_statusline_usage(now=self.NOW))
+
+        os.unlink(self.path)
+        self.assertIsNone(helper.load_statusline_usage(now=self.NOW))
+
+        for document in (
+            [],
+            {"captured_at": "now"},
+            {"captured_at": self.NOW, "seven_day": None},
+            {
+                "captured_at": self.NOW,
+                "seven_day": {"utilization": 200, "resets_at": self.NOW + 1},
+            },
+            {
+                "captured_at": self.NOW,
+                "seven_day": {"utilization": 50, "resets_at": "soon"},
+            },
+            {
+                "captured_at": float("nan"),
+                "seven_day": {"utilization": 50, "resets_at": self.NOW + 1},
+            },
+            {
+                "captured_at": float("inf"),
+                "seven_day": {"utilization": 50, "resets_at": self.NOW + 1},
+            },
+            {
+                "captured_at": self.NOW,
+                "seven_day": {"utilization": float("nan"), "resets_at": self.NOW + 1},
+            },
+            {
+                "captured_at": self.NOW,
+                "seven_day": {"utilization": float("inf"), "resets_at": self.NOW + 1},
+            },
+            {
+                "captured_at": self.NOW,
+                "seven_day": {"utilization": 50, "resets_at": float("nan")},
+            },
+            {
+                "captured_at": self.NOW,
+                "seven_day": {"utilization": 50, "resets_at": float("inf")},
+            },
+            {
+                "captured_at": self.NOW,
+                "seven_day": {"utilization": 50, "resets_at": 10**30},
+            },
+        ):
+            with open(self.path, "w", encoding="utf-8") as handle:
+                json.dump(document, handle)
+            with self.subTest(document=document):
+                self.assertIsNone(helper.load_statusline_usage(now=self.NOW))
+
+    def test_non_finite_five_hour_is_dropped_but_seven_day_still_used(self) -> None:
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(bad=bad):
+                self._write_cache(
+                    self.NOW - 60,
+                    {"utilization": bad, "resets_at": self.NOW + 1},
+                    {"utilization": 50, "resets_at": self.NOW + 86400},
+                )
+                result = helper.load_statusline_usage(now=self.NOW)
+                self.assertIsNone(result["five_hour"])
+                self.assertEqual(result["seven_day"]["utilization"], 50)
+
+    def test_expired_seven_day_falls_back_but_expired_five_hour_is_dropped(
+        self,
+    ) -> None:
+        self._write_cache(
+            self.NOW - 60,
+            {"utilization": 42, "resets_at": self.NOW - 1},
+            {"utilization": 80, "resets_at": self.NOW - 1},
+        )
+        self.assertIsNone(helper.load_statusline_usage(now=self.NOW))
+
+        self._write_cache(
+            self.NOW - 60,
+            {"utilization": 42, "resets_at": self.NOW - 1},
+            {"utilization": 80, "resets_at": self.NOW + 86400},
+        )
+        result = helper.load_statusline_usage(now=self.NOW)
+        self.assertIsNone(result["five_hour"])
+        self.assertEqual(result["seven_day"]["utilization"], 80)
+
+    def test_main_endpoint_fallback_is_unchanged(self) -> None:
+        with (
+            mock.patch(
+                "claude_max_usage.read_oauth_token", return_value=SYNTHETIC_TOKEN
+            ),
+            mock.patch("claude_max_usage.fetch_usage") as fetch,
+            mock.patch("sys.stdout", new_callable=lambda: io.StringIO()) as out,
+        ):
+            fetch.return_value = {
+                "five_hour": None,
+                "seven_day": {"utilization": 9, "resets_at": "2026-08-23T08:59:59Z"},
+                "seven_day_sonnet": None,
+            }
+            rc = helper.main([])
+
+        self.assertEqual(rc, 0)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(set(payload), {"five_hour", "seven_day", "seven_day_sonnet"})
+        fetch.assert_called_once_with(
+            SYNTHETIC_TOKEN, timeout=helper.FETCH_TIMEOUT_SECS
+        )
 
 
 if __name__ == "__main__":

@@ -8,7 +8,28 @@ Keychain or the Linux Claude credentials file, never constructs an
 local Codex app-server over stdio and runs one
 bounded helper subprocess per provider that needs credentials.
 
-`claude_max_usage.py` is the sole credential boundary. On macOS it:
+`claude_max_usage.py` is the sole credential boundary. Its primary source
+is the documented Claude Code `statusLine` feed, captured by the bundled
+`claude_statusline.py` collector: it reads at most 1 MiB of the status-line
+JSON from stdin, validates the `five_hour` and `seven_day`
+`used_percentage` values (0..100) and reset epochs (bounded to no more than
+one year ahead), normalizes them to
+`utilization`, and persists only `captured_at` plus
+those two normalized windows to `claude-statusline.json` in the plugin state
+directory (`HERDR_PLUGIN_STATE_DIR`, then `MODEL_LANES_STATE_DIR`, then
+`XDG_STATE_HOME`/`~/.local/state` under
+`herdr/plugins/terry.herdr-model-lanes`), written atomically with mode
+`0600`. It never persists `session_id`, `model`, `cwd`, workspace,
+transcript paths, or prompt data, and never echoes stdin in errors. When
+arguments follow `--`, the original stdin bytes are forwarded to that exact
+argv without a shell and with a short timeout; on failure the collector
+renders its own concise status line. The helper reads this cache before any
+credential or network access and uses it while `captured_at` is at most 30
+minutes old and the weekly window is live; `--refresh` does not bypass a
+valid cache.
+
+When the cache is missing, stale, malformed, or expired, the helper falls
+back to the undocumented OAuth endpoint. On macOS it:
 
 - runs `/usr/bin/security find-generic-password -s "Claude Code-credentials"
   -w` directly, without a shell, with a timeout of at most five seconds;
@@ -33,7 +54,7 @@ codes only; they never echo Keychain output, HTTP bodies, or tokens. Caches
 under `HERDR_PLUGIN_STATE_DIR` contain normalized percentages and reset
 timestamps only.
 
-## Experimental, unofficial Claude endpoint
+## Experimental, unofficial Claude endpoint fallback
 
 The Anthropic OAuth usage endpoint is undocumented. It is not a public,
 versioned API and may change or stop working without notice. Claude support is

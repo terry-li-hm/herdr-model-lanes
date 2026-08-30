@@ -1,0 +1,27 @@
+#!/bin/sh
+# claude-statusline: statusLine feed for Claude Code.
+# Usage: claude-statusline [-- downstream-command args...]
+# Reads at most 1 MiB of status-line JSON on stdin, caches the normalized
+# 5h/7d quota windows for the Model Lanes plugin, and prints a concise
+# status line (or forwards stdin to the downstream command after "--").
+
+set -eu
+
+script="$0"
+if resolved=$(readlink -f "$script" 2>/dev/null) && [ -n "$resolved" ]; then
+    script="$resolved"
+else
+    script=$(python3 - "$script" <<'EOF'
+import os
+import sys
+
+print(os.path.realpath(sys.argv[1]))
+EOF
+    )
+fi
+plugin_dir=$(CDPATH= cd -- "$(dirname -- "$script")/.." && pwd)
+
+: "${HERDR_PLUGIN_STATE_DIR:=${MODEL_LANES_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/terry.herdr-model-lanes}}"
+export HERDR_PLUGIN_STATE_DIR
+
+exec python3 "$plugin_dir/claude_statusline.py" "$@"
