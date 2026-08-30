@@ -1,3 +1,4 @@
+import contextlib
 import io
 import json
 import random
@@ -312,13 +313,16 @@ class GrokRefreshTests(unittest.TestCase):
         query_grok.side_effect = quota.QuotaError("Grok offline")
         query_codex.side_effect = quota.QuotaError("Codex offline")
 
-        with tempfile.TemporaryDirectory() as directory:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            contextlib.redirect_stdout(io.StringIO()) as stdout,
+        ):
             outcome = quota.refresh(
                 state_dir=Path(directory), now=NOW, include_grok=True
             )
 
         self.assertIsNone(outcome.grok)
-        self.assertIn("Gk n/a", publish.call_args.args[0])
+        self.assertIn("Gk n/a", stdout.getvalue())
 
 
 class GlmTests(unittest.TestCase):
@@ -436,13 +440,16 @@ class GlmTests(unittest.TestCase):
         query_glm.side_effect = quota.QuotaError("GLM offline")
         query_codex.side_effect = quota.QuotaError("Codex offline")
 
-        with tempfile.TemporaryDirectory() as directory:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            contextlib.redirect_stdout(io.StringIO()) as stdout,
+        ):
             outcome = quota.refresh(
                 state_dir=Path(directory), now=NOW, include_glm=True
             )
 
         self.assertIsNone(outcome.glm)
-        self.assertIn("Gl n/a", publish.call_args.args[0])
+        self.assertIn("Gl n/a", stdout.getvalue())
 
 
 class AntigravityTests(unittest.TestCase):
@@ -554,13 +561,16 @@ class AntigravityTests(unittest.TestCase):
         query_antigravity.side_effect = quota.QuotaError("Antigravity offline")
         query_codex.side_effect = quota.QuotaError("Codex offline")
 
-        with tempfile.TemporaryDirectory() as directory:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            contextlib.redirect_stdout(io.StringIO()) as stdout,
+        ):
             outcome = quota.refresh(
                 state_dir=Path(directory), now=NOW, include_antigravity=True
             )
 
         self.assertIsNone(outcome.antigravity)
-        self.assertIn("Ag n/a", publish.call_args.args[0])
+        self.assertIn("Ag n/a", stdout.getvalue())
 
 
 class KimiTests(unittest.TestCase):
@@ -674,13 +684,16 @@ class KimiTests(unittest.TestCase):
         query_kimi.side_effect = quota.QuotaError("Kimi offline")
         query_codex.side_effect = quota.QuotaError("Codex offline")
 
-        with tempfile.TemporaryDirectory() as directory:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            contextlib.redirect_stdout(io.StringIO()) as stdout,
+        ):
             outcome = quota.refresh(
                 state_dir=Path(directory), now=NOW, include_kimi=True
             )
 
         self.assertIsNone(outcome.kimi)
-        self.assertIn("Km n/a", publish.call_args.args[0])
+        self.assertIn("Km n/a", stdout.getvalue())
 
 
 class CursorTests(unittest.TestCase):

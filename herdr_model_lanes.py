@@ -1204,12 +1204,13 @@ def _list_workspaces(herdr_bin: str) -> list[dict]:
 
 
 def publish_to_focused_workspace(
-    token_value: str, core_row: str, other_row: str, herdr_bin: str = "herdr"
+    core_row: str, other_row: str, herdr_bin: str = "herdr"
 ) -> None:
     """Set the two sidebar tokens on the focused workspace; clear elsewhere.
 
-    The legacy ``model_quota`` token is cleared on every workspace during
-    every publish.
+    One ``report-metadata`` call per workspace: the legacy ``model_quota``
+    token is always cleared, nonempty rows are set on the focused workspace
+    while empty rows are cleared, and both row tokens are cleared elsewhere.
     """
     workspaces = _list_workspaces(herdr_bin)
     for workspace in workspaces:
@@ -1221,36 +1222,41 @@ def publish_to_focused_workspace(
             PLUGIN_ID,
             "--ttl-ms",
             str(TOKEN_TTL_MS),
+            "--clear-token",
+            TOKEN_LEGACY_NAME,
         ]
-        updates: list[tuple[str, str | None]] = [(TOKEN_LEGACY_NAME, None)]
-        focused = bool(workspace.get("focused"))
-        for name, row in ((TOKEN_CORE_NAME, core_row), (TOKEN_OTHER_NAME, other_row)):
-            updates.append((name, row if focused and row else None))
-        for name, value in updates:
-            call_args = list(args)
-            if value is None:
-                call_args.extend(["--clear-token", name])
-            else:
-                call_args.extend(["--token", f"{name}={value}"])
-            _herdr(herdr_bin, call_args)
+        if workspace.get("focused"):
+            for name, row in (
+                (TOKEN_CORE_NAME, core_row),
+                (TOKEN_OTHER_NAME, other_row),
+            ):
+                args.extend(
+                    ["--token", f"{name}={row}"] if row else ["--clear-token", name]
+                )
+        else:
+            args.extend(
+                ["--clear-token", TOKEN_CORE_NAME, "--clear-token", TOKEN_OTHER_NAME]
+            )
+        _herdr(herdr_bin, args)
 
 
 def clear_all(herdr_bin: str = "herdr") -> None:
     """Clear every model quota token from every workspace."""
     for workspace in _list_workspaces(herdr_bin):
-        for name in TOKEN_NAMES:
-            _herdr(
-                herdr_bin,
-                [
-                    "workspace",
-                    "report-metadata",
-                    workspace["workspace_id"],
-                    "--source",
-                    PLUGIN_ID,
-                    "--clear-token",
-                    name,
-                ],
-            )
+        args = [
+            "workspace",
+            "report-metadata",
+            workspace["workspace_id"],
+            "--source",
+            PLUGIN_ID,
+            "--clear-token",
+            TOKEN_LEGACY_NAME,
+            "--clear-token",
+            TOKEN_CORE_NAME,
+            "--clear-token",
+            TOKEN_OTHER_NAME,
+        ]
+        _herdr(herdr_bin, args)
 
 
 # ---------------------------------------------------------------------------
@@ -1582,7 +1588,7 @@ def refresh(
         cursor_stale,
     )
     try:
-        publish_to_focused_workspace(line, core_row, other_row, herdr_bin=herdr_bin)
+        publish_to_focused_workspace(core_row, other_row, herdr_bin=herdr_bin)
     except QuotaError:
         pass
     print(line, file=sys.stdout if emit else sys.stderr, flush=True)

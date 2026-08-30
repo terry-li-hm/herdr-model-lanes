@@ -436,31 +436,54 @@ class PublicationTests(unittest.TestCase):
                 ),
                 stderr="",
             )
-        ] + [mock.Mock(returncode=0, stdout="{}", stderr="") for _ in range(6)]
+        ] + [mock.Mock(returncode=0, stdout="{}", stderr="") for _ in range(2)]
 
-        quota.publish_to_focused_workspace(
-            "Cx 7% | Cl 91%", "Cx 7%·1h", "5h 50%·1h", herdr_bin="herdr"
-        )
+        quota.publish_to_focused_workspace("Cx 7%·1h", "5h 50%·1h", herdr_bin="herdr")
 
         calls = [item.args[0] for item in run.call_args_list]
+        self.assertEqual(len(calls), 3)
         self.assertEqual(calls[0], ["herdr", "workspace", "list"])
-        unfocused = [call for call in calls[1:4]]
-        for call in unfocused:
-            self.assertEqual(call[3], "w1")
-            self.assertIn("--clear-token", call)
-        cleared = {call[-1] for call in unfocused}
-        self.assertEqual(cleared, set(quota.TOKEN_NAMES))
-        focused_calls = calls[4:7]
+        self.assertEqual(calls[1][:2], ["herdr", "workspace"])
+        self.assertEqual(calls[1][3], "w1")
         self.assertEqual(
-            [call[-1] for call in focused_calls],
+            calls[1],
             [
+                "herdr",
+                "workspace",
+                "report-metadata",
+                "w1",
+                "--source",
+                quota.PLUGIN_ID,
+                "--ttl-ms",
+                str(quota.TOKEN_TTL_MS),
+                "--clear-token",
                 "model_quota",
+                "--clear-token",
+                "model_quota_core",
+                "--clear-token",
+                "model_quota_other",
+            ],
+        )
+        self.assertEqual(calls[2][3], "w2")
+        self.assertEqual(
+            calls[2],
+            [
+                "herdr",
+                "workspace",
+                "report-metadata",
+                "w2",
+                "--source",
+                quota.PLUGIN_ID,
+                "--ttl-ms",
+                str(quota.TOKEN_TTL_MS),
+                "--clear-token",
+                "model_quota",
+                "--token",
                 "model_quota_core=Cx 7%·1h",
+                "--token",
                 "model_quota_other=5h 50%·1h",
             ],
         )
-        for call in focused_calls:
-            self.assertEqual(call[3], "w2")
 
     @mock.patch("herdr_model_lanes.subprocess.run")
     def test_empty_rows_clear_their_tokens_on_focused_workspace(
@@ -479,15 +502,27 @@ class PublicationTests(unittest.TestCase):
                     }
                 ),
                 stderr="",
-            )
-        ] + [mock.Mock(returncode=0, stdout="{}", stderr="") for _ in range(3)]
+            ),
+            mock.Mock(returncode=0, stdout="{}", stderr=""),
+        ]
 
-        quota.publish_to_focused_workspace("Cx n/a | Cl n/a", "", "")
+        quota.publish_to_focused_workspace("", "")
 
-        calls = [item.args[0] for item in run.call_args_list][1:]
-        self.assertEqual(calls[0][3], "w1")
-        cleared = {call[-1] for call in calls}
-        self.assertEqual(cleared, set(quota.TOKEN_NAMES))
+        calls = [item.args[0] for item in run.call_args_list]
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0], ["herdr", "workspace", "list"])
+        self.assertEqual(calls[1][3], "w1")
+        self.assertEqual(
+            calls[1][8:],
+            [
+                "--clear-token",
+                "model_quota",
+                "--clear-token",
+                "model_quota_core",
+                "--clear-token",
+                "model_quota_other",
+            ],
+        )
 
     @mock.patch("herdr_model_lanes.subprocess.run")
     def test_clear_all_clears_every_token_on_every_workspace(
@@ -508,16 +543,25 @@ class PublicationTests(unittest.TestCase):
                 ),
                 stderr="",
             )
-        ] + [mock.Mock(returncode=0, stdout="{}", stderr="") for _ in range(6)]
+        ] + [mock.Mock(returncode=0, stdout="{}", stderr="") for _ in range(2)]
 
         quota.clear_all()
 
-        calls = [item.args[0] for item in run.call_args_list][1:]
-        self.assertEqual(len(calls), 6)
-        for call in calls:
-            self.assertIn("--clear-token", call)
-        self.assertEqual({call[-1] for call in calls}, set(quota.TOKEN_NAMES))
-        self.assertEqual({call[3] for call in calls}, {"w1", "w2"})
+        calls = [item.args[0] for item in run.call_args_list]
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[0], ["herdr", "workspace", "list"])
+        expected_clears = [
+            "--clear-token",
+            "model_quota",
+            "--clear-token",
+            "model_quota_core",
+            "--clear-token",
+            "model_quota_other",
+        ]
+        for call in calls[1:]:
+            self.assertEqual(call[:2], ["herdr", "workspace"])
+            self.assertEqual(call[6:], expected_clears)
+        self.assertEqual([call[3] for call in calls[1:]], ["w1", "w2"])
 
 
 class RefreshTests(unittest.TestCase):
@@ -556,7 +600,6 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual(outcome.codex, cached_codex)
         self.assertEqual(outcome.claude, refreshed_claude)
         publish.assert_called_once_with(
-            "Cx 7%!! · 2h | Cl 91% · 5h",
             "Cx 7%!!·2h  Cl 91%·5h",
             "",
             herdr_bin="herdr",
@@ -591,7 +634,6 @@ class RefreshTests(unittest.TestCase):
         self.assertTrue(outcome.claude_stale)
         self.assertEqual(len(outcome.errors), 2)
         publish.assert_called_once_with(
-            "Cx 7%!!~ · 2h | Cl 91%~ · 5h",
             "Cx 7%!!~·2h  Cl 91%~·5h",
             "",
             herdr_bin="herdr",
