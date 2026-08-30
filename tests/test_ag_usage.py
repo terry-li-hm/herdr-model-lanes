@@ -133,13 +133,13 @@ class UsageCommandTests(unittest.TestCase):
         self.assertEqual(code, 0)
         lines = [line for line in out.splitlines() if line]
         self.assertEqual(len(lines), 7)
-        self.assertIn("Cx 75% · 2d0h", out)
-        self.assertIn("Cl 91% · 5d0h", out)
-        self.assertIn("Gk 30% · 3d0h", out)
-        self.assertIn("Gl 50% · 2h", out)
-        self.assertIn("Ag 90% · 6d0h", out)
-        self.assertIn("Km 80% · 4d0h", out)
-        self.assertIn("Cu 60% · 12d0h", out)
+        self.assertIn("Codex weekly (Cx) 75% · 2d0h", out)
+        self.assertIn("Claude weekly (Cl) 91% · 5d0h", out)
+        self.assertIn("Grok weekly (Gk) 30% · 3d0h", out)
+        self.assertIn("GLM 5h (Gl) 50% · 2h", out)
+        self.assertIn("Antigravity Gemini (Ag) 90% · 6d0h", out)
+        self.assertIn("Kimi coding (Km) 80% · 4d0h", out)
+        self.assertIn("Cursor monthly (Cu) 60% · 12d0h", out)
 
     def test_json_output_is_stable_and_normalized(self) -> None:
         for name, usage in (
@@ -172,7 +172,7 @@ class UsageCommandTests(unittest.TestCase):
         code, out = self.run_usage([])
 
         self.assertEqual(code, 0)
-        self.assertIn("Cx 75%", out)
+        self.assertIn("Codex weekly (Cx) 75%", out)
         self.assertEqual(self.commands["codex"], ["codex"])
 
     def test_existing_output_has_no_plan_fields(self) -> None:
@@ -205,8 +205,8 @@ class UsageCommandTests(unittest.TestCase):
         code, out = self.run_usage([])
 
         self.assertEqual(code, 0)
-        self.assertIn("Gk n/a (Grok helper failed with rc=1)", out)
-        self.assertIn("Cl 91%", out)
+        self.assertIn("Grok weekly (Gk) n/a (Grok helper failed with rc=1)", out)
+        self.assertIn("Claude weekly (Cl) 91%", out)
 
     def test_partial_failure_json_keeps_error_per_provider(self) -> None:
         self.stub_refresh("kimi", None, error="Kimi helper failed with rc=2")
@@ -225,7 +225,7 @@ class UsageCommandTests(unittest.TestCase):
         code, out = self.run_usage([])
 
         self.assertEqual(code, 1)
-        self.assertIn("Cl n/a", out)
+        self.assertIn("Claude weekly (Cl) n/a", out)
 
     def test_unconfigured_provider_is_skipped(self) -> None:
         patcher = mock.patch.object(quota, "_grok_login_exists", return_value=False)
@@ -235,7 +235,7 @@ class UsageCommandTests(unittest.TestCase):
         code, out = self.run_usage([])
 
         self.assertEqual(code, 0)
-        self.assertNotIn("Gk", out)
+        self.assertNotIn("Grok weekly", out)
 
     def test_invalid_flag_exits_nonzero(self) -> None:
         stderr = io.StringIO()
@@ -322,15 +322,15 @@ class UsageCommandTests(unittest.TestCase):
         code, out = self.run_usage(["--plan"])
 
         self.assertEqual(code, 0)
-        self.assertIn("Cx 75% · 2d0h [surplus]", out)
-        self.assertIn("Gl 50% · 2h [on_pace]", out)
-        self.assertIn("Gk n/a [unknown] (helper failed)", out)
-        self.assertIn("Km 80%~ · 4d0h [unknown] (cached fallback)", out)
+        self.assertIn("Codex weekly (Cx) 75% · 2d0h [surplus]", out)
+        self.assertIn("GLM 5h (Gl) 50% · 2h [on_pace]", out)
+        self.assertIn("Grok weekly (Gk) n/a [unknown] (helper failed)", out)
+        self.assertIn("Kimi coding (Km) 80%~ · 4d0h [unknown] (cached fallback)", out)
         self.assertEqual(out.count("(cached fallback)"), 1)
         self.assertTrue(
             out.rstrip().endswith(
-                "surplus Cx: pull forward at most one ready, verifiable task; "
-                "stop after one accepted artifact"
+                "surplus Codex weekly (Cx): pull forward at most one ready, "
+                "verifiable task; stop after one accepted artifact"
             )
         )
 
@@ -371,8 +371,8 @@ class UsageCommandTests(unittest.TestCase):
         self.assertEqual(payload["providers"]["glm"]["state"], "on_pace")
         self.assertEqual(
             payload["recommendation"],
-            "surplus Cx: pull forward at most one ready, verifiable task; "
-            "stop after one accepted artifact",
+            "surplus Codex weekly (Cx): pull forward at most one ready, "
+            "verifiable task; stop after one accepted artifact",
         )
 
     def test_main_dispatches_usage_flags_past_ag_parser(self) -> None:

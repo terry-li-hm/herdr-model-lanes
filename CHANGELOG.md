@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Changed
+
+- Human-readable `ag usage` rows now spell out each provider and the quota
+  window its reader selects while retaining the compact abbreviation:
+  `Codex weekly (Cx)`, `Claude weekly (Cl)`, `Grok weekly (Gk)`, `GLM 5h
+  (Gl)`, `Antigravity Gemini (Ag)`, `Kimi coding (Km)`, and `Cursor monthly
+  (Cu)`. The compact picker/sidebar output, the `ag usage --json` schema,
+  and its provider keys are unchanged.
+
 ### Added
 
 - Claude Max usage now comes primarily from the documented Claude Code

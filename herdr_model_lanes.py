@@ -1997,7 +1997,7 @@ def collect_usage(force: bool, state_dir: Path, now: int) -> list[UsageRow]:
     specs = (
         (
             "codex",
-            "Cx",
+            "Codex weekly (Cx)",
             lambda: True,
             _refresh_codex,
             CODEX_CACHE_FILENAME,
@@ -2006,7 +2006,7 @@ def collect_usage(force: bool, state_dir: Path, now: int) -> list[UsageRow]:
         ),
         (
             "claude",
-            "Cl",
+            "Claude weekly (Cl)",
             lambda: True,
             _refresh_claude,
             CLAUDE_CACHE_FILENAME,
@@ -2015,7 +2015,7 @@ def collect_usage(force: bool, state_dir: Path, now: int) -> list[UsageRow]:
         ),
         (
             "grok",
-            "Gk",
+            "Grok weekly (Gk)",
             _grok_login_exists,
             _refresh_grok,
             GROK_CACHE_FILENAME,
@@ -2024,7 +2024,7 @@ def collect_usage(force: bool, state_dir: Path, now: int) -> list[UsageRow]:
         ),
         (
             "glm",
-            "Gl",
+            "GLM 5h (Gl)",
             glm_usage.key_available,
             _refresh_glm,
             GLM_CACHE_FILENAME,
@@ -2033,7 +2033,7 @@ def collect_usage(force: bool, state_dir: Path, now: int) -> list[UsageRow]:
         ),
         (
             "antigravity",
-            "Ag",
+            "Antigravity Gemini (Ag)",
             antigravity_usage.probe_available,
             _refresh_antigravity,
             ANTIGRAVITY_CACHE_FILENAME,
@@ -2042,7 +2042,7 @@ def collect_usage(force: bool, state_dir: Path, now: int) -> list[UsageRow]:
         ),
         (
             "kimi",
-            "Km",
+            "Kimi coding (Km)",
             kimi_usage.key_available,
             _refresh_kimi,
             KIMI_CACHE_FILENAME,
@@ -2051,7 +2051,7 @@ def collect_usage(force: bool, state_dir: Path, now: int) -> list[UsageRow]:
         ),
         (
             "cursor",
-            "Cu",
+            "Cursor monthly (Cu)",
             cursor_usage.key_available,
             _refresh_cursor,
             CURSOR_CACHE_FILENAME,

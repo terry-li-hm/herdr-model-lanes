@@ -232,8 +232,14 @@ ln -s "$PWD/bin/ag" ~/.local/bin/ag
 
 `ag usage` prints one row per configured provider (Codex, Claude, Grok, GLM,
 Antigravity, Kimi Code, Cursor) with remaining percentage and reset
-countdown, reusing the same cached readers; `--json` emits a stable
-machine-readable object keyed by provider name, and `--refresh` bypasses
+countdown, reusing the same cached readers. Human-readable rows spell out
+the provider and the quota window the reader selects while keeping the
+compact abbreviation used elsewhere: `Codex weekly (Cx)`, `Claude weekly
+(Cl)`, `Grok weekly (Gk)`, `GLM 5h (Gl)`, `Antigravity Gemini (Ag)` (the
+tightest Gemini bucket), `Kimi coding (Km)` (weekly membership or the
+five-hour rate limit, whichever is tighter), and `Cursor monthly (Cu)`.
+The picker and sidebar stay compact (`Cx`, `Cl`, …), and `--json` emits a
+stable machine-readable object keyed by provider name; `--refresh` bypasses
 each reader's cache. A failed provider prints `n/a` with its error without
 suppressing the others; the exit code is nonzero only if every provider
 fails or the invocation is invalid.
