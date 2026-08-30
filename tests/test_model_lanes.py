@@ -275,9 +275,152 @@ class ClaudeQueryTests(unittest.TestCase):
         self.assertFalse(run.call_args.kwargs.get("shell", False))
 
 
+class SidebarTests(unittest.TestCase):
+    def test_representative_two_rows(self) -> None:
+        codex = quota.CodexUsage(window(25, 75, 2 * 86_400), NOW, "pro")
+        claude = quota.ClaudeUsage(
+            weekly=window(9, 91, 5 * 3_600),
+            session=window(50, 50, 3_600),
+            sonnet=None,
+            fetched_at=NOW,
+        )
+        grok = quota.GrokUsage(window(80, 20, 86_400), NOW)
+        glm = quota.GlmUsage(window(60, 40, 4 * 3_600), NOW)
+        kimi = quota.KimiUsage(window(30, 70, 10 * 3_600), NOW)
+
+        core, other = quota.format_sidebar_rows(
+            codex, claude, NOW, grok=grok, glm=glm, kimi=kimi
+        )
+
+        self.assertEqual(core, "Cx 75%·2d0h  Cl 91%·5h")
+        self.assertEqual(other, "5h 50%·1h  Gk 20%·1d0h  +2")
+        for row in (core, other):
+            self.assertLessEqual(len(row), quota.SIDEBAR_MAX_WIDTH)
+
+    def test_row_width_never_exceeds_36(self) -> None:
+        codex = quota.CodexUsage(window(1, 99, 6 * 86_400), NOW, "pro")
+        claude = quota.ClaudeUsage(
+            weekly=window(1, 99, 6 * 86_400),
+            session=window(1, 99, 4 * 3_600),
+            sonnet=window(1, 99, 6 * 86_400),
+            fetched_at=NOW,
+        )
+        providers = (
+            quota.GrokUsage(window(1, 99, 6 * 86_400), NOW),
+            quota.GlmUsage(window(1, 99, 4 * 3_600), NOW),
+            quota.AntigravityUsage(window(1, 99, 6 * 86_400), NOW),
+            quota.KimiUsage(window(1, 99, 6 * 86_400), NOW),
+            quota.CursorUsage(window(1, 99, 20 * 86_400), NOW),
+        )
+
+        core, other = quota.format_sidebar_rows(
+            codex,
+            claude,
+            NOW,
+            grok=providers[0],
+            glm=providers[1],
+            antigravity=providers[2],
+            kimi=providers[3],
+            cursor=providers[4],
+        )
+
+        self.assertLessEqual(len(core), 36)
+        self.assertLessEqual(len(other), 36)
+
+    def test_overflow_fits_whole_segments_then_plus_n(self) -> None:
+        claude = quota.ClaudeUsage(
+            weekly=window(1, 99, 6 * 86_400),
+            session=window(1, 99, 4 * 3_600),
+            sonnet=window(1, 99, 6 * 86_400),
+            fetched_at=NOW,
+        )
+        grok = quota.GrokUsage(window(1, 99, 6 * 86_400), NOW)
+        glm = quota.GlmUsage(window(1, 99, 4 * 3_600), NOW)
+        antigravity = quota.AntigravityUsage(window(1, 99, 6 * 86_400), NOW)
+        kimi = quota.KimiUsage(window(1, 99, 6 * 86_400), NOW)
+        cursor = quota.CursorUsage(window(1, 99, 20 * 86_400), NOW)
+
+        core, other = quota.format_sidebar_rows(
+            None,
+            claude,
+            NOW,
+            grok=grok,
+            glm=glm,
+            antigravity=antigravity,
+            kimi=kimi,
+            cursor=cursor,
+        )
+
+        self.assertEqual(core, "Cl 99%·6d0h")
+        # The weekly-relative constraints are not tighter, so five optional
+        # segments remain; only whole segments fit and the rest is +3.
+        self.assertEqual(other, "Gk 99%·6d0h  Gl 99%·4h  +3")
+        self.assertLessEqual(len(other), 36)
+        # Only whole segments appear: no truncated labels.
+        for part in other.split("  "):
+            self.assertRegex(part, r"^(5h|S|Gk|Gl|Ag|Km|Cu|\+\d+)")
+
+    def test_omitted_providers_do_not_appear(self) -> None:
+        claude = quota.ClaudeUsage(
+            weekly=window(10, 90, 86_400),
+            session=None,
+            sonnet=None,
+            fetched_at=NOW,
+        )
+
+        core, other = quota.format_sidebar_rows(None, claude, NOW)
+
+        self.assertEqual(core, "Cl 90%·1d0h")
+        self.assertEqual(other, "")
+
+    def test_warning_and_stale_marks_survive(self) -> None:
+        codex = quota.CodexUsage(window(93, 7, 3_600), NOW, "pro")
+        claude = quota.ClaudeUsage(
+            weekly=window(85, 15, 3_600),
+            session=window(95, 5, 1_800),
+            sonnet=None,
+            fetched_at=NOW,
+        )
+
+        core, other = quota.format_sidebar_rows(
+            codex, claude, NOW, codex_stale=True, claude_stale=True
+        )
+
+        self.assertEqual(core, "Cx 7%!!~·1h  Cl 15%!~·1h")
+        self.assertEqual(other, "5h 5%!!·30m")
+
+    def test_sonnet_appears_only_when_tighter(self) -> None:
+        claude = quota.ClaudeUsage(
+            weekly=window(10, 90, 86_400),
+            session=None,
+            sonnet=window(80, 20, 86_400),
+            fetched_at=NOW,
+        )
+        loose = quota.ClaudeUsage(
+            weekly=window(10, 90, 86_400),
+            session=None,
+            sonnet=window(10, 90, 86_400),
+            fetched_at=NOW,
+        )
+
+        _, tight_row = quota.format_sidebar_rows(None, claude, NOW)
+        _, loose_row = quota.format_sidebar_rows(None, loose, NOW)
+
+        self.assertEqual(tight_row, "S 20%·1d0h")
+        self.assertEqual(loose_row, "")
+
+    def test_no_live_segments_yield_empty_rows(self) -> None:
+        self.assertEqual(quota.format_sidebar_rows(None, None, NOW), ("", ""))
+
+    def test_wrong_optional_types_are_omitted_not_na(self) -> None:
+        core, other = quota.format_sidebar_rows(None, None, NOW, grok=object())
+
+        self.assertEqual((core, other), ("", ""))
+
+
 class PublicationTests(unittest.TestCase):
     @mock.patch("herdr_model_lanes.subprocess.run")
-    def test_publishes_only_on_focused_workspace(self, run: mock.Mock) -> None:
+    def test_publishes_rows_only_on_focused_workspace(self, run: mock.Mock) -> None:
         run.side_effect = [
             mock.Mock(
                 returncode=0,
@@ -292,21 +435,89 @@ class PublicationTests(unittest.TestCase):
                     }
                 ),
                 stderr="",
-            ),
-            mock.Mock(returncode=0, stdout="{}", stderr=""),
-            mock.Mock(returncode=0, stdout="{}", stderr=""),
-        ]
+            )
+        ] + [mock.Mock(returncode=0, stdout="{}", stderr="") for _ in range(6)]
 
-        quota.publish_to_focused_workspace("Cx 7% | Cl 91%", herdr_bin="herdr")
+        quota.publish_to_focused_workspace(
+            "Cx 7% | Cl 91%", "Cx 7%·1h", "5h 50%·1h", herdr_bin="herdr"
+        )
 
         calls = [item.args[0] for item in run.call_args_list]
         self.assertEqual(calls[0], ["herdr", "workspace", "list"])
-        self.assertEqual(calls[1][3], "w1")
-        self.assertIn("--clear-token", calls[1])
-        self.assertIn(quota.TOKEN_NAME, calls[1])
-        self.assertEqual(calls[2][3], "w2")
-        self.assertIn("--token", calls[2])
-        self.assertIn("model_quota=Cx 7% | Cl 91%", calls[2])
+        unfocused = [call for call in calls[1:4]]
+        for call in unfocused:
+            self.assertEqual(call[3], "w1")
+            self.assertIn("--clear-token", call)
+        cleared = {call[-1] for call in unfocused}
+        self.assertEqual(cleared, set(quota.TOKEN_NAMES))
+        focused_calls = calls[4:7]
+        self.assertEqual(
+            [call[-1] for call in focused_calls],
+            [
+                "model_quota",
+                "model_quota_core=Cx 7%·1h",
+                "model_quota_other=5h 50%·1h",
+            ],
+        )
+        for call in focused_calls:
+            self.assertEqual(call[3], "w2")
+
+    @mock.patch("herdr_model_lanes.subprocess.run")
+    def test_empty_rows_clear_their_tokens_on_focused_workspace(
+        self, run: mock.Mock
+    ) -> None:
+        run.side_effect = [
+            mock.Mock(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "result": {
+                            "workspaces": [
+                                {"workspace_id": "w1", "focused": True},
+                            ]
+                        }
+                    }
+                ),
+                stderr="",
+            )
+        ] + [mock.Mock(returncode=0, stdout="{}", stderr="") for _ in range(3)]
+
+        quota.publish_to_focused_workspace("Cx n/a | Cl n/a", "", "")
+
+        calls = [item.args[0] for item in run.call_args_list][1:]
+        self.assertEqual(calls[0][3], "w1")
+        cleared = {call[-1] for call in calls}
+        self.assertEqual(cleared, set(quota.TOKEN_NAMES))
+
+    @mock.patch("herdr_model_lanes.subprocess.run")
+    def test_clear_all_clears_every_token_on_every_workspace(
+        self, run: mock.Mock
+    ) -> None:
+        run.side_effect = [
+            mock.Mock(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "result": {
+                            "workspaces": [
+                                {"workspace_id": "w1", "focused": True},
+                                {"workspace_id": "w2", "focused": False},
+                            ]
+                        }
+                    }
+                ),
+                stderr="",
+            )
+        ] + [mock.Mock(returncode=0, stdout="{}", stderr="") for _ in range(6)]
+
+        quota.clear_all()
+
+        calls = [item.args[0] for item in run.call_args_list][1:]
+        self.assertEqual(len(calls), 6)
+        for call in calls:
+            self.assertIn("--clear-token", call)
+        self.assertEqual({call[-1] for call in calls}, set(quota.TOKEN_NAMES))
+        self.assertEqual({call[3] for call in calls}, {"w1", "w2"})
 
 
 class RefreshTests(unittest.TestCase):
@@ -344,7 +555,12 @@ class RefreshTests(unittest.TestCase):
         query_claude.assert_called_once()
         self.assertEqual(outcome.codex, cached_codex)
         self.assertEqual(outcome.claude, refreshed_claude)
-        publish.assert_called_once_with("Cx 7%!! · 2h | Cl 91% · 5h", herdr_bin="herdr")
+        publish.assert_called_once_with(
+            "Cx 7%!! · 2h | Cl 91% · 5h",
+            "Cx 7%!!·2h  Cl 91%·5h",
+            "",
+            herdr_bin="herdr",
+        )
 
     @mock.patch("herdr_model_lanes.publish_to_focused_workspace")
     @mock.patch("herdr_model_lanes.query_claude")
@@ -375,7 +591,10 @@ class RefreshTests(unittest.TestCase):
         self.assertTrue(outcome.claude_stale)
         self.assertEqual(len(outcome.errors), 2)
         publish.assert_called_once_with(
-            "Cx 7%!!~ · 2h | Cl 91%~ · 5h", herdr_bin="herdr"
+            "Cx 7%!!~ · 2h | Cl 91%~ · 5h",
+            "Cx 7%!!~·2h  Cl 91%~·5h",
+            "",
+            herdr_bin="herdr",
         )
 
 

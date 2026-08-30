@@ -4,6 +4,17 @@
 
 ### Changed
 
+- The Herdr sidebar quota display is now two compact rows instead of one
+  token. `model_quota_core` carries only the live Codex and Claude weekly
+  windows; `model_quota_other` carries only the live tighter Claude
+  constraints (five-hour, Sonnet) and the optional Grok, GLM, Antigravity,
+  Kimi, and Cursor windows. Rows use compact `Cx 75%·2d0h` segments
+  separated by two spaces, never wider than 36 display characters, fitting
+  only whole segments and ending with a `+N` count when live segments
+  remain. Unavailable providers are omitted (never `n/a`), an empty row
+  clears its token, the legacy `model_quota` token is cleared on every
+  publish and clear, and refresh stdout still prints the full one-line
+  quota string unchanged.
 - Human-readable `ag usage` rows now spell out each provider and the quota
   window its reader selects while retaining the compact abbreviation:
   `Codex weekly (Cx)`, `Claude weekly (Cl)`, `Grok weekly (Gk)`, `GLM 5h

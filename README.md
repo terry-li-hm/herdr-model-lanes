@@ -148,10 +148,11 @@ timeout. Raw source responses and errors are not logged.
 
 ## Herdr behavior and configuration
 
-The plugin publishes `$model_quota` only to the focused workspace and clears
-it from every other workspace. Herdr 0.8 has no global header or footer plugin
-slot, so the clearest available surface is a dedicated line beneath the active
-workspace. A 36-column minimum keeps both providers visible:
+The plugin publishes two sidebar tokens only to the focused workspace and
+clears them, plus the legacy single `$model_quota` token, from every other
+workspace. Herdr 0.8 has no global header or footer plugin slot, so the
+clearest available surface is a dedicated line beneath the active workspace.
+A 36-column minimum keeps both rows visible:
 
 ```toml
 [ui]
@@ -161,10 +162,25 @@ sidebar_min_width = 36
 [ui.sidebar.spaces]
 rows = [
   ["state_icon", "workspace"],
-  ["$model_quota"],
+  ["$model_quota_core"],
+  ["$model_quota_other"],
   ["branch", "git_status"],
 ]
 ```
+
+The two rows use progressive disclosure. `$model_quota_core` carries only the
+live Codex and Claude weekly windows, so the two subscriptions that gate
+routing stay on the first line. `$model_quota_other` carries only the live
+tighter Claude constraints (five-hour and Sonnet weekly windows) plus the
+optional Grok, GLM, Antigravity, Kimi, and Cursor windows, so secondary
+capacity is read only when the core line warrants a glance. Each row fits
+whole compact segments such as `Cx 75%·2d0h` (separated by two spaces)
+within 36 display columns; when live segments remain that cannot fit, the row
+ends with a compact `+N` count instead of truncating a segment. A provider
+without live data is omitted rather than shown as `n/a`, a row with no live
+segment clears, and the `!`/`!!` warning and `~` stale marks carry over from
+the full line. Herdr `refresh` stdout still prints the existing full one-line
+quota string.
 
 ## Model-class routing
 

@@ -54,7 +54,10 @@ CURSOR_REFRESH_INTERVAL_SECS = 1_800
 CURSOR_HELPER_TIMEOUT_SECS = 12
 LAUNCH_TIMEOUT_SECS = 30
 PLUGIN_ID = "terry.herdr-model-lanes"
-TOKEN_NAME = "model_quota"
+TOKEN_LEGACY_NAME = "model_quota"
+TOKEN_CORE_NAME = "model_quota_core"
+TOKEN_OTHER_NAME = "model_quota_other"
+TOKEN_NAMES = (TOKEN_LEGACY_NAME, TOKEN_CORE_NAME, TOKEN_OTHER_NAME)
 TOKEN_TTL_MS = 2 * 60 * 60 * 1000
 CODEX_CACHE_FILENAME = "codex-quota.json"
 CLAUDE_CACHE_FILENAME = "claude-quota.json"
@@ -79,6 +82,7 @@ LANE_EXECUTABLES = {
     "kimi": "kimi",
 }
 UNSET = object()
+SIDEBAR_MAX_WIDTH = 36
 NON_SUBSCRIPTION_PLAN_MARKERS = ("api", "payg", "usage", "trial")
 
 
@@ -414,6 +418,29 @@ def _format_constraint(label: str, window: QuotaWindow, now: int) -> str:
     return _format_window(label, window, now, stale=False)
 
 
+def _optional_segments() -> tuple:
+    """Optional providers in display order: (value later)."""
+    return (
+        ("grok", GrokUsage, "Gk", lambda u: u.weekly),
+        ("glm", GlmUsage, "Gl", lambda u: u.five_hour),
+        ("antigravity", AntigravityUsage, "Ag", lambda u: u.gemini),
+        ("kimi", KimiUsage, "Km", lambda u: u.coding),
+        ("cursor", CursorUsage, "Cu", lambda u: u.monthly),
+    )
+
+
+def _tighter_claude_constraints(claude: ClaudeUsage) -> list[tuple[str, QuotaWindow]]:
+    """Claude windows tighter than the weekly budget, in display order."""
+    constraints = []
+    for label, window in (("5h", claude.session), ("S", claude.sonnet)):
+        if window is not None and (
+            window.remaining_percent < claude.weekly.remaining_percent
+            or window.remaining_percent < 20
+        ):
+            constraints.append((label, window))
+    return constraints
+
+
 def format_quota(
     codex: CodexUsage | None,
     claude: ClaudeUsage | None,
@@ -452,22 +479,111 @@ def format_quota(
 
     line = f"{codex_text} | {claude_text}"
     # Optional segments in display order; UNSET omits one, wrong types show n/a.
-    segments = (
-        (grok, grok_stale, GrokUsage, "Gk", lambda u: u.weekly),
-        (glm, glm_stale, GlmUsage, "Gl", lambda u: u.five_hour),
-        (antigravity, antigravity_stale, AntigravityUsage, "Ag", lambda u: u.gemini),
-        (kimi, kimi_stale, KimiUsage, "Km", lambda u: u.coding),
-        (cursor, cursor_stale, CursorUsage, "Cu", lambda u: u.monthly),
-    )
-    for value, stale, usage_type, label, window_of in segments:
+    values = {
+        "grok": grok,
+        "glm": glm,
+        "antigravity": antigravity,
+        "kimi": kimi,
+        "cursor": cursor,
+    }
+    stales = {
+        "grok": grok_stale,
+        "glm": glm_stale,
+        "antigravity": antigravity_stale,
+        "kimi": kimi_stale,
+        "cursor": cursor_stale,
+    }
+    for key, usage_type, label, window_of in _optional_segments():
+        value = values[key]
         if value is UNSET:
             continue
         usage = value if isinstance(value, usage_type) else None
         text = f"{label} n/a"
         if usage is not None:
-            text = _format_window(label, window_of(usage), now, stale)
+            text = _format_window(label, window_of(usage), now, stales[key])
         line += f" | {text}"
     return line
+
+
+def _sidebar_segment(label: str, window: QuotaWindow, now: int, stale: bool) -> str:
+    """One compact sidebar segment, such as ``Cx 75%!·2d0h``."""
+    remaining = max(0, min(100, window.remaining_percent))
+    marker = "~" if stale else ""
+    text = f"{label} {remaining}%{_warning(remaining)}{marker}"
+    reset = _countdown(window.resets_at, now)
+    if reset:
+        text += f"·{reset}"
+    return text
+
+
+def _fit_sidebar_segments(segments: list[str]) -> str:
+    """Join whole segments with two spaces, ``+N`` overflow, within 36 chars."""
+    for count in range(len(segments), 0, -1):
+        base = "  ".join(segments[:count])
+        omitted = len(segments) - count
+        suffix = f"  +{omitted}" if omitted else ""
+        if len(base) + len(suffix) <= SIDEBAR_MAX_WIDTH:
+            return base + suffix
+    return ""
+
+
+def format_sidebar_rows(
+    codex: CodexUsage | None,
+    claude: ClaudeUsage | None,
+    now: int,
+    codex_stale: bool = False,
+    claude_stale: bool = False,
+    grok: GrokUsage | None | object = UNSET,
+    grok_stale: bool = False,
+    glm: GlmUsage | None | object = UNSET,
+    glm_stale: bool = False,
+    antigravity: AntigravityUsage | None | object = UNSET,
+    antigravity_stale: bool = False,
+    kimi: KimiUsage | None | object = UNSET,
+    kimi_stale: bool = False,
+    cursor: CursorUsage | None | object = UNSET,
+    cursor_stale: bool = False,
+) -> tuple[str, str]:
+    """Two compact sidebar rows (core, other); live windows only, no n/a."""
+    core_segments: list[str] = []
+    if codex is not None:
+        core_segments.append(_sidebar_segment("Cx", codex.weekly, now, codex_stale))
+    if claude is not None:
+        core_segments.append(
+            _sidebar_segment(
+                "Cl", claude.weekly, now, claude_stale or claude.source_stale
+            )
+        )
+
+    other_segments: list[str] = []
+    if claude is not None:
+        for label, window in _tighter_claude_constraints(claude):
+            other_segments.append(_sidebar_segment(label, window, now, False))
+    values = {
+        "grok": grok,
+        "glm": glm,
+        "antigravity": antigravity,
+        "kimi": kimi,
+        "cursor": cursor,
+    }
+    stales = {
+        "grok": grok_stale,
+        "glm": glm_stale,
+        "antigravity": antigravity_stale,
+        "kimi": kimi_stale,
+        "cursor": cursor_stale,
+    }
+    for key, usage_type, label, window_of in _optional_segments():
+        usage = values[key]
+        if isinstance(usage, usage_type):
+            other_segments.append(
+                _sidebar_segment(label, window_of(usage), now, stales[key])
+            )
+
+    return (
+        _fit_sidebar_segments(core_segments),
+        _fit_sidebar_segments(other_segments),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1087,8 +1203,14 @@ def _list_workspaces(herdr_bin: str) -> list[dict]:
     return (result.get("result") or {}).get("workspaces") or []
 
 
-def publish_to_focused_workspace(token_value: str, herdr_bin: str = "herdr") -> None:
-    """Set ``model_quota`` only on the focused workspace."""
+def publish_to_focused_workspace(
+    token_value: str, core_row: str, other_row: str, herdr_bin: str = "herdr"
+) -> None:
+    """Set the two sidebar tokens on the focused workspace; clear elsewhere.
+
+    The legacy ``model_quota`` token is cleared on every workspace during
+    every publish.
+    """
     workspaces = _list_workspaces(herdr_bin)
     for workspace in workspaces:
         args = [
@@ -1100,28 +1222,35 @@ def publish_to_focused_workspace(token_value: str, herdr_bin: str = "herdr") -> 
             "--ttl-ms",
             str(TOKEN_TTL_MS),
         ]
-        if workspace.get("focused"):
-            args.extend(["--token", f"{TOKEN_NAME}={token_value}"])
-        else:
-            args.extend(["--clear-token", TOKEN_NAME])
-        _herdr(herdr_bin, args)
+        updates: list[tuple[str, str | None]] = [(TOKEN_LEGACY_NAME, None)]
+        focused = bool(workspace.get("focused"))
+        for name, row in ((TOKEN_CORE_NAME, core_row), (TOKEN_OTHER_NAME, other_row)):
+            updates.append((name, row if focused and row else None))
+        for name, value in updates:
+            call_args = list(args)
+            if value is None:
+                call_args.extend(["--clear-token", name])
+            else:
+                call_args.extend(["--token", f"{name}={value}"])
+            _herdr(herdr_bin, call_args)
 
 
 def clear_all(herdr_bin: str = "herdr") -> None:
-    """Clear the model quota token from every workspace."""
+    """Clear every model quota token from every workspace."""
     for workspace in _list_workspaces(herdr_bin):
-        _herdr(
-            herdr_bin,
-            [
-                "workspace",
-                "report-metadata",
-                workspace["workspace_id"],
-                "--source",
-                PLUGIN_ID,
-                "--clear-token",
-                TOKEN_NAME,
-            ],
-        )
+        for name in TOKEN_NAMES:
+            _herdr(
+                herdr_bin,
+                [
+                    "workspace",
+                    "report-metadata",
+                    workspace["workspace_id"],
+                    "--source",
+                    PLUGIN_ID,
+                    "--clear-token",
+                    name,
+                ],
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1435,8 +1564,25 @@ def refresh(
         cursor if include_cursor else UNSET,
         cursor_stale,
     )
+    core_row, other_row = format_sidebar_rows(
+        codex,
+        claude,
+        now,
+        codex_stale,
+        claude_stale,
+        grok if include_grok else UNSET,
+        grok_stale,
+        glm if include_glm else UNSET,
+        glm_stale,
+        antigravity if include_antigravity else UNSET,
+        antigravity_stale,
+        kimi if include_kimi else UNSET,
+        kimi_stale,
+        cursor if include_cursor else UNSET,
+        cursor_stale,
+    )
     try:
-        publish_to_focused_workspace(line, herdr_bin=herdr_bin)
+        publish_to_focused_workspace(line, core_row, other_row, herdr_bin=herdr_bin)
     except QuotaError:
         pass
     print(line, file=sys.stdout if emit else sys.stderr, flush=True)
@@ -1824,7 +1970,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Bypass per-source refresh intervals",
     )
-    sub.add_parser("clear", help="Clear the model_quota token from every workspace")
+    sub.add_parser("clear", help="Clear the model quota tokens from every workspace")
     route_parent = _route_parser(add_help=False)
     sub.add_parser(
         "route",
