@@ -18,6 +18,7 @@ import stat
 import subprocess
 import sys
 import time
+import tempfile
 import urllib.request
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -32,6 +33,8 @@ CREDENTIALS_FILENAME = ".credentials.json"
 MAX_CREDENTIALS_BYTES = 64 * 1024
 USER_AGENT = f"herdr-model-lanes/{PLUGIN_VERSION} (Claude Max usage helper)"
 NORMALIZED_WINDOWS = ("five_hour", "seven_day", "seven_day_sonnet")
+SCOPED_CACHE_FILENAME = "claude-scoped-limit.json"
+SCOPED_REFRESH_SECS = 15 * 60
 STATUSLINE_PLUGIN_ID_PATH = "herdr/plugins/terry.herdr-model-lanes"
 STATUSLINE_CACHE_FILENAME = "claude-statusline.json"
 STATUSLINE_CACHE_MAX_AGE_SECS = 30 * 60
@@ -186,10 +189,95 @@ def _normalize_window(value: object, name: str) -> dict | None:
     }
 
 
+def _iso_to_epoch(value: object) -> int | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        from datetime import datetime
+        return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
+    except ValueError:
+        return None
+
+
+def extract_scoped_limit(document: object) -> dict | None:
+    """Return the model-scoped weekly limit from ``limits``, or None.
+
+    The usage endpoint lists a ``weekly_scoped`` entry when a model carries
+    its own weekly cap (the Fable cap, September 2026). The result carries
+    only the scope display name, the percent used and the reset epoch.
+    """
+    if not isinstance(document, dict):
+        return None
+    limits = document.get("limits")
+    if not isinstance(limits, list):
+        return None
+    for entry in limits:
+        if not isinstance(entry, dict) or entry.get("kind") != "weekly_scoped":
+            continue
+        percent = entry.get("percent")
+        if isinstance(percent, bool) or not isinstance(percent, (int, float)):
+            continue
+        scope = entry.get("scope")
+        name = None
+        if isinstance(scope, dict):
+            model = scope.get("model")
+            if isinstance(model, dict) and isinstance(model.get("display_name"), str):
+                name = model["display_name"]
+        resets_at = _iso_to_epoch(entry.get("resets_at"))
+        if name and resets_at is not None:
+            return {"scope": name, "utilization": float(percent), "resets_at": resets_at}
+    return None
+
+
+def scoped_cache_path() -> str:
+    return os.path.join(os.path.dirname(statusline_cache_path()), SCOPED_CACHE_FILENAME)
+
+
+def save_scoped_limit(scoped: dict | None, fetched_at: int, path: str | None = None) -> None:
+    """Atomically persist the scoped limit with mode 0600; None clears it."""
+    if path is None:
+        path = scoped_cache_path()
+    directory = os.path.dirname(path)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    if scoped is None:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        return
+    payload = json.dumps({**scoped, "fetched_at": fetched_at}).encode("utf-8")
+    fd, temp_name = tempfile.mkstemp(dir=directory, prefix=".scoped.", suffix=".tmp")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+        os.replace(temp_name, path)
+    except BaseException:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+
+
+def _scoped_cache_age(now: int, path: str | None = None) -> int | None:
+    if path is None:
+        path = scoped_cache_path()
+    try:
+        document = json.loads(open(path, "rb").read(MAX_RESPONSE_BYTES).decode("utf-8"))
+        fetched_at = document.get("fetched_at")
+    except (OSError, ValueError, UnicodeDecodeError, AttributeError):
+        return None
+    if not _is_finite_number(fetched_at):
+        return None
+    return now - int(fetched_at)
+
+
 def fetch_usage(
     token: str,
     timeout: int = FETCH_TIMEOUT_SECS,
     opener: Callable[[urllib.request.Request, int], object] | None = None,
+    include_scoped: bool = False,
 ) -> dict:
     """Fetch and normalize OAuth usage; return only the three quota windows."""
     request = urllib.request.Request(
@@ -220,10 +308,13 @@ def fetch_usage(
         raise UsageHelperError("usage endpoint returned invalid JSON") from exc
     if not isinstance(document, dict):
         raise UsageHelperError("usage endpoint returned a non-object payload")
-    return {
+    windows = {
         window: _normalize_window(document.get(window), window)
         for window in NORMALIZED_WINDOWS
     }
+    if include_scoped:
+        windows["weekly_scoped"] = extract_scoped_limit(document)
+    return windows
 
 
 def statusline_cache_path() -> str:
@@ -339,13 +430,27 @@ def main(argv: list[str] | None = None) -> int:
 
     The official status-line cache is checked first, before any credential
     or network access; ``--refresh`` does not bypass a valid cache because
-    the point is avoiding endpoint calls.
+    the point is avoiding endpoint calls. ``--scoped`` is the one mode that
+    always calls the endpoint: it records the model-scoped weekly limit
+    (the Fable cap) for the status line and prints only that window.
     """
     args = sys.argv[1:] if argv is None else list(argv)
     for arg in args:
-        if arg != "--refresh":
-            print(f"usage: {sys.argv[0]} [--refresh]", file=sys.stderr)
+        if arg not in ("--refresh", "--scoped"):
+            print(f"usage: {sys.argv[0]} [--refresh] [--scoped]", file=sys.stderr)
             return 2
+    if "--scoped" in args:
+        now = int(time.time())
+        try:
+            windows = fetch_usage(
+                read_oauth_token(), timeout=FETCH_TIMEOUT_SECS, include_scoped=True
+            )
+            save_scoped_limit(windows.get("weekly_scoped"), now)
+        except (UsageHelperError, OSError) as exc:
+            print(f"claude usage error: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps(windows.get("weekly_scoped")))
+        return 0
     try:
         cached = load_statusline_usage()
         if cached is not None:
@@ -360,4 +465,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

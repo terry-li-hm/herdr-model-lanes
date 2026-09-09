@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import stat
 import tempfile
 import time
 import unittest
@@ -687,3 +688,33 @@ class StatuslineCacheTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ScopedLimitTests(unittest.TestCase):
+    def test_extracts_model_scoped_weekly_limit(self) -> None:
+        document = {
+            "limits": [
+                {"kind": "session", "percent": 13, "resets_at": "2026-09-09T13:20:00+00:00", "scope": None},
+                {"kind": "weekly_all", "percent": 39, "resets_at": "2026-09-13T09:00:00+00:00", "scope": None},
+                {"kind": "weekly_scoped", "percent": 76, "severity": "warning",
+                 "resets_at": "2026-09-13T09:00:00+00:00",
+                 "scope": {"model": {"id": None, "display_name": "Fable"}, "surface": None}},
+            ]
+        }
+        scoped = helper.extract_scoped_limit(document)
+        self.assertEqual(scoped, {"scope": "Fable", "utilization": 76.0, "resets_at": 1789290000})
+
+    def test_no_scoped_entry_returns_none(self) -> None:
+        self.assertIsNone(helper.extract_scoped_limit({"limits": [{"kind": "weekly_all", "percent": 1}]}))
+        self.assertIsNone(helper.extract_scoped_limit({"limits": None}))
+        self.assertIsNone(helper.extract_scoped_limit("nope"))
+
+    def test_save_scoped_limit_round_trips_with_mode_0600(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "claude-scoped-limit.json")
+            helper.save_scoped_limit({"scope": "Fable", "utilization": 76.0, "resets_at": 1789290000}, 1788950000, path)
+            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+            self.assertEqual(json.load(open(path)), {"scope": "Fable", "utilization": 76.0, "resets_at": 1789290000, "fetched_at": 1788950000})
+            self.assertEqual(helper._scoped_cache_age(1788950900, path), 900)
+            helper.save_scoped_limit(None, 1788950000, path)
+            self.assertFalse(os.path.exists(path))

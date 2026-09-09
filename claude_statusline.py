@@ -30,6 +30,8 @@ from pathlib import Path
 
 PLUGIN_ID_PATH = "herdr/plugins/terry.herdr-model-lanes"
 CACHE_FILENAME = "claude-statusline.json"
+SCOPED_CACHE_FILENAME = "claude-scoped-limit.json"
+SCOPED_CACHE_MAX_AGE_SECS = 24 * 3600
 MAX_INPUT_BYTES = 1 << 20
 MAX_CACHE_BYTES = 64 * 1024
 DOWNSTREAM_TIMEOUT_SECS = 1
@@ -137,6 +139,36 @@ def save_cache(
         raise
 
 
+
+def load_scoped_limit(now: int, state_dir: str | os.PathLike[str] | None = None) -> dict | None:
+    """Return the cached model-scoped weekly limit written by claude_max_usage.
+
+    The cache is used only when ``fetched_at`` is within 24 hours and the
+    window has not reset. Returns ``{"scope", "utilization", "resets_at"}``.
+    """
+    path = statusline_cache_path(state_dir).with_name(SCOPED_CACHE_FILENAME)
+    try:
+        if path.stat().st_size > MAX_CACHE_BYTES:
+            return None
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    fetched_at = document.get("fetched_at")
+    if not _is_finite_number(fetched_at) or not (now - SCOPED_CACHE_MAX_AGE_SECS) <= fetched_at <= now + 60:
+        return None
+    scope = document.get("scope")
+    utilization = document.get("utilization")
+    resets_at = document.get("resets_at")
+    if not isinstance(scope, str) or not scope:
+        return None
+    if not _is_finite_number(utilization) or not 0 <= utilization <= 100:
+        return None
+    if not _is_finite_number(resets_at) or int(resets_at) <= now:
+        return None
+    return {"scope": scope, "utilization": utilization, "resets_at": int(resets_at)}
+
 def _countdown(resets_at: int, now: int) -> str:
     seconds = max(resets_at - now, 0)
     if seconds < 60:
@@ -171,13 +203,15 @@ def render_status_line(
                 model = display
         elif isinstance(model_obj, str) and model_obj:
             model = model_obj
-    return " | ".join(
-        (
-            model,
-            _window_text("5h", five_hour, now),
-            _window_text("7d", seven_day, now),
-        )
-    )
+    parts = [
+        model,
+        _window_text("5h", five_hour, now),
+        _window_text("7d", seven_day, now),
+    ]
+    scoped = load_scoped_limit(now)
+    if scoped is not None:
+        parts.append(_window_text(scoped["scope"], scoped, now))
+    return " | ".join(parts)
 
 
 def run_downstream(argv: list[str], stdin_bytes: bytes) -> bool:

@@ -418,3 +418,28 @@ class CollectorMainTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ScopedLimitRenderTests(unittest.TestCase):
+    def test_renders_scoped_limit_from_cache(self) -> None:
+        now = 1788950000
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "claude-scoped-limit.json").write_text(json.dumps(
+                {"scope": "Fable", "utilization": 76.0, "resets_at": 1789290000, "fetched_at": now - 60}))
+            with mock.patch.dict(os.environ, {"HERDR_PLUGIN_STATE_DIR": tmp}):
+                line = collector.render_status_line(
+                    {"model": {"display_name": "Fable 5.1"}},
+                    {"utilization": 12, "resets_at": now + 6000},
+                    {"utilization": 38, "resets_at": now + 340000},
+                    now,
+                )
+        self.assertEqual(line, "Fable 5.1 | 5h 12% (1h40m) | 7d 38% (3d22h) | Fable 76% (3d22h)")
+
+    def test_stale_or_reset_scoped_cache_is_ignored(self) -> None:
+        now = 1788950000
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "claude-scoped-limit.json").write_text(json.dumps(
+                {"scope": "Fable", "utilization": 76.0, "resets_at": now - 1, "fetched_at": now - 60}))
+            with mock.patch.dict(os.environ, {"HERDR_PLUGIN_STATE_DIR": tmp}):
+                line = collector.render_status_line({"model": "Fable"}, None, None, now)
+        self.assertEqual(line, "Fable | 5h n/a | 7d n/a")
