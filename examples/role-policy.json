@@ -1,0 +1,37 @@
+{
+  "roles": {
+    "reviewer": {
+      "primary": "claude-review",
+      "fallback": ["claude-alternate", "codex-review"],
+      "maxTier": 2
+    },
+    "researcher": {
+      "primary": "codex-review",
+      "fallback": [],
+      "maxTier": 2
+    }
+  },
+  "routes": {
+    "claude-review": {
+      "kind": "claude",
+      "model": "claude-opus-4-6",
+      "effort": "high",
+      "qualified": true,
+      "tier": 1
+    },
+    "claude-alternate": {
+      "kind": "claude",
+      "model": "claude-sonnet-4-6",
+      "effort": "high",
+      "qualified": true,
+      "tier": 2
+    },
+    "codex-review": {
+      "kind": "codex",
+      "model": "gpt-5.5",
+      "effort": "high",
+      "qualified": true,
+      "tier": 2
+    }
+  }
+}

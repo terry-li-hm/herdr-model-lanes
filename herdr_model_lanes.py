@@ -1968,6 +1968,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="Show subscription capacity and route a model-class lane.",
     )
     sub = parser.add_subparsers(dest="command")
+    sub.add_parser("role", help="Select a native runtime from an external role policy")
+
     refresh_p = sub.add_parser(
         "refresh", help="Refresh quota caches and publish the sidebar line"
     )
@@ -2469,6 +2471,10 @@ def _cmd_refresh(force: bool) -> int:
 
 
 def main(argv: list[str]) -> int:
+    if argv and argv[0] == "role":
+        import role_launch
+
+        return role_launch.main(argv[1:])
     parser = build_parser()
     if not argv:
         return _cmd_refresh(force=False)

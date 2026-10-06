@@ -1,0 +1,30 @@
+# Copy outside the checkout and point at YOUR existing role policy.
+policy_file = "role-policy.json"
+selection = "strict-priority"
+headroom_percent = 5
+unknown_capacity = "skip" # skip unknown lanes, or hold before lower priorities
+holds_file = "holds.json" # manual holds; a missing file means none
+# Optional: read ROLE/AGENTS.md on each invocation. Relative links keep their base.
+# instructions_root = "/path/to/agents"
+
+[proxy]
+management_url = "http://127.0.0.1:8317"
+key_env = "CLIPROXYAPI_MANAGEMENT_KEY"
+# Optional mode-0600, same-user regular file: raw key or KEY_ENV=value dotenv.
+# key_file = "/path/to/protected/management.env"
+timeout_seconds = 4
+budget_seconds = 20
+cache_seconds = 0 # capped at 60; nonzero can hide a fresh proxy cooldown
+
+# These must ALREADY route inference through the same proxy and account pool.
+# This assertion is deliberately required; it does not configure native auth.
+# Prefer absolute paths to your managed launchers. No shell aliases/functions.
+[launchers.claude]
+command = ["claude"]
+proxy_routed = true
+args = []
+
+[launchers.codex]
+command = ["codex"]
+proxy_routed = true
+args = []

@@ -1,5 +1,9 @@
 # herdr-model-lanes
 
+For strict-priority, per-role native Claude/Codex launches through CLIProxyAPI,
+see [role routing](ROLE_ROUTING.md). `bin/ag-role` reads external role policies
+and refuses to launch when no allowed route has capacity.
+
 Herdr 0.8 plugin that shows the remaining weekly subscription capacity for
 **ChatGPT Codex** and **Claude Max** in the focused workspace row. A normal
 value looks like:

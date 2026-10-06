@@ -1,0 +1,24 @@
+#!/bin/sh
+# ag-role: noninteractive role selection before a native CLI launch.
+# Usage: ag-role ROLE --config PATH [--explain | --exec | --launch --workspace ID]
+
+set -eu
+
+script="$0"
+if resolved=$(readlink -f "$script" 2>/dev/null) && [ -n "$resolved" ]; then
+    script="$resolved"
+else
+    script=$(python3 - "$script" <<'EOF'
+import os
+import sys
+
+print(os.path.realpath(sys.argv[1]))
+EOF
+    )
+fi
+plugin_dir=$(CDPATH= cd -- "$(dirname -- "$script")/.." && pwd)
+
+: "${HERDR_PLUGIN_STATE_DIR:=${MODEL_LANES_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/terry.herdr-model-lanes}}"
+export HERDR_PLUGIN_STATE_DIR
+
+exec python3 "$plugin_dir/herdr_model_lanes.py" role "$@"
