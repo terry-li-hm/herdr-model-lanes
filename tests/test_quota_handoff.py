@@ -355,6 +355,21 @@ class TestDetection(unittest.TestCase):
             with self.subTest(later=later):
                 self.assertFalse(qh.tail_notice(LIVE + later))
 
+    def test_native_auto_mode_footer(self):
+        text = (NOTICE + "\nContinuing automatically at 4:40pm · esc to cancel · /usage-credits to continue now"
+                + "\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents")
+        self.assertTrue(qh.tail_notice(text))
+        self.assertFalse(qh.tail_notice(text + "\nuser draft text"))
+        self.assertFalse(qh.tail_notice(text + "\n❯ queued shell command"))
+        # Footer shape alone never fabricates a notice.
+        self.assertFalse(qh.tail_notice("  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents"))
+        # Near-miss variants stay rejected.
+        for near in ("⏵⏵ auto mode on (shift+tab to cycle) · → for agents",
+                     "⏵⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
+                     "▸▸ auto mode on (shift+tab to cycle) · ← for agentsX"):
+            with self.subTest(near=near):
+                self.assertFalse(qh.tail_notice(NOTICE + "\n" + near))
+
 
 class TestQuotaParsing(unittest.TestCase):
     def test_native_iso_and_unused(self):
@@ -1755,6 +1770,351 @@ class TestProcAdapter(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True), patch.object(qh.socket, "socket") as factory:
             self.assertIsNone(qh.OsPort().server_peer())
             factory.assert_not_called()
+
+
+class TestPiTerminalFooter(FixtureTest):
+    def footer(self, cwd, stats="2.1k · 98% (openai-codex) gpt-6.1-sol • high"):
+        return PI_FRIENDLY + "\n────────────────\n" + cwd + "\n" + stats
+
+    def test_exact_cwd_and_stats_footer_accepted(self):
+        temp = TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        fixture = Fixture(temp.name, route="pi")
+        cwd = str(fixture.cwd)
+        self.assertTrue(qh.pi_tail_notice(self.footer(cwd), cwd))
+        fixture.cli.live = self.footer(cwd)
+        self.assertIsNotNone(fixture.engine.detect_exhausted(fixture.cli.source))
+
+    def test_wrong_cwd_or_stats_refused(self):
+        cwd = str(self.f.cwd)
+        for text in (self.footer(cwd + "/nested"), self.footer("/elsewhere" + cwd),
+                     self.footer(cwd, stats="2.1k · 98% (openai-codex) gpt-6.1-pro • high"),
+                     self.footer(cwd, stats="(openai-codex) gpt-6.1-sol • medium"),
+                     self.footer(cwd, stats="2.1k · 98% (openai-codex) gpt-6.1-sol")):
+            with self.subTest(text=text.splitlines()[-1]):
+                self.assertFalse(qh.pi_tail_notice(text, cwd))
+
+    def test_appended_draft_or_queued_text_refused(self):
+        cwd = str(self.f.cwd)
+        for extra in ("queued user text", "❯ half-typed draft", "user follow up", "$ echo hi"):
+            with self.subTest(extra=extra):
+                self.assertFalse(qh.pi_tail_notice(self.footer(cwd) + "\n" + extra, cwd))
+        # Non-absolute/odd cwd never authorizes tolerating a line.
+        self.assertFalse(qh.pi_tail_notice(self.footer("relative/path"), "relative/path"))
+
+    def widget(self, label=None, middle=None, bottom="╰ gpt-6.1-sol • high ────────────────────────────────────╯"):
+        return ["╭────────────────────────────────────────────── " + (label or "work") + " ╮",
+                middle if middle is not None else "│❯                                                      │", bottom]
+
+    def test_input_widget_frame_accepted(self):
+        temp = TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        fixture = Fixture(temp.name, route="pi")
+        self.assertEqual(os.path.basename(str(fixture.cwd)), "work")
+        text = PI_FRIENDLY + "\n" + "\n".join(self.widget())
+        self.assertTrue(qh.pi_tail_notice(text, str(fixture.cwd)))
+        fixture.cli.live = text
+        self.assertIsNotNone(fixture.engine.detect_exhausted(fixture.cli.source))
+        fixture.config.enabled, fixture.config.observe_only = False, True
+        fixture.quota.codex = codex_payload(100)
+        self.assertEqual(fixture.engine.handle_event({"pane_id": "source-pane"})["status"], "observed")
+        # Border-length variation is fine; label must be the exact basename.
+        self.assertTrue(qh.pi_tail_notice(PI_FRIENDLY + "\n" + "\n".join(
+            self.widget()[:1] + ["│❯    │", "╰ gpt-6.1-sol • medium ─╯"]), str(fixture.cwd)))
+
+    def test_input_widget_draft_or_wrong_frame_refused(self):
+        cwd = str(self.f.cwd)
+        for text in (PI_FRIENDLY + "\n" + "\n".join(self.widget(middle="│❯ new task text                                │")),
+                     PI_FRIENDLY + "\n" + "\n".join(self.widget(label="vivesca")),
+                     PI_FRIENDLY + "\n" + "\n".join(self.widget(label="..")),
+                     PI_FRIENDLY + "\n" + "\n".join(self.widget(bottom="╰ gpt-6.1-pro • high ───────────────────────────────────╯")),
+                     PI_FRIENDLY + "\n" + "\n".join(self.widget(bottom="╰ gpt-6.1-sol • ultra ───────────────────────────────╯")),
+                     PI_FRIENDLY + "\n" + "\n".join(self.widget() + ["queued text"])):
+            with self.subTest(text=text.splitlines()[-1][:40]):
+                self.assertFalse(qh.pi_tail_notice(text, cwd))
+
+    def test_stats_footer_rejects_prose_prefix(self):
+        cwd = str(self.f.cwd)
+        for stats in ("please wait, queued (openai-codex) gpt-6.1-sol • high",
+                      "❯ draft input (openai-codex) gpt-6.1-sol • high",
+                      "user said retry later (openai-codex) gpt-6.1-sol • high",
+                      "4 tries left until reset (openai-codex) gpt-6.1-sol • high"):
+            with self.subTest(stats=stats):
+                self.assertFalse(qh.pi_tail_notice(PI_FRIENDLY + "\n" + stats, cwd))
+        for stats in ("2.1k · 98% (openai-codex) gpt-6.1-sol • high",
+                      "$1.23 (openai-codex) gpt-6.1-sol • high",
+                      "45k tok · 2.1k · 98% (openai-codex) gpt-6.1-sol • high"):
+            with self.subTest(stats=stats):
+                self.assertTrue(qh.pi_tail_notice(PI_FRIENDLY + "\n" + stats, cwd))
+
+    def test_pi_observe_with_real_tui_footer(self):
+        temp = TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        fixture = Fixture(temp.name, route="pi")
+        fixture.config.enabled, fixture.config.observe_only = False, True
+        fixture.quota.codex = codex_payload(100)
+        fixture.cli.live = self.footer(str(fixture.cwd))
+        result = fixture.engine.handle_event({"pane_id": "source-pane"})
+        self.assertEqual(result["status"], "observed")
+        self.assertEqual(fixture.os.kills + fixture.cli.created + fixture.cli.started + fixture.cli.prompts, [])
+
+
+class TestObservation(FixtureTest):
+    def observe(self):
+        self.f.config.enabled = False
+        self.f.config.observe_only = True
+        return self.f.event()
+
+    def observation_path(self):
+        return self.f.state / "observations" / (qh.event_key(self.f.cli.source) + ".json")
+
+    def test_mode_matrix(self):
+        cfg = self.f.config
+        self.assertTrue(self.f.engine.can_control())
+        self.assertTrue(cfg.authorized())
+        cfg.enabled, cfg.observe_only = False, True
+        self.assertFalse(cfg.authorized())
+        self.assertTrue(cfg.observation_authorized())
+        self.assertTrue(self.f.engine.can_observe())
+        self.assertFalse(self.f.engine.can_control())
+        for enabled, observe in ((False, False), (True, True), (True, "yes"), (False, 1), ("true", False), (None, None)):
+            with self.subTest(mode=(enabled, observe)):
+                cfg.enabled, cfg.observe_only = enabled, observe
+                self.assertFalse(cfg.authorized())
+                self.assertFalse(cfg.observation_authorized())
+                self.assertFalse(self.f.engine.operational())
+                self.assertFalse(self.f.engine.can_control())
+                self.assertFalse(self.f.engine.can_observe())
+
+    def test_disabled_fast_path_makes_no_herdr_calls(self):
+        self.f.config.enabled = self.f.config.observe_only = False
+        result = self.f.engine.handle_event({"bogus": 1})
+        self.assertEqual(result, {"status": "disabled", "mutated": False})
+        self.assertEqual(self.f.cli.argvs, [])
+
+    def test_observe_native_records_content_free_witness(self):
+        result = self.observe()
+        self.assertEqual(result["status"], "observed")
+        self.assertFalse(result["mutated"])
+        self.assertTrue(result["observed"])
+        self.assertEqual(result["source_pane"], "source-pane")
+        self.no_control(result)
+        self.assertEqual(self.f.quota.calls, [])
+        self.assertIsNone(self.f.receipt())
+        self.assertFalse((self.f.state / "exclusions.json").exists())
+        self.assertFalse((self.f.state / "markers").exists())
+        path = self.observation_path()
+        record = json.loads(path.read_text())
+        self.assertEqual(record["version"], 1)
+        self.assertEqual(record["event_key"], qh.event_key(self.f.cli.source))
+        self.assertEqual(record["source"], {"pane_id": "source-pane", "tab_id": "source-tab",
+                                           "workspace_id": "ws1", "agent": "claude"})
+        self.assertEqual(record["source_token"], qh.digest(qh.identity(self.f.cli.source)))
+        self.assertEqual(record["error_timestamp"], qh._to_epoch(iso()))
+        raw = path.read_text()
+        self.assertNotIn(CANARY, raw)
+        self.assertNotIn(NOTICE, raw)
+        self.assertNotIn(str(self.f.path), raw)
+        self.assertNotIn(str(self.f.home), raw)
+
+    def test_observe_excluded_profile_never_probed_or_recorded(self):
+        self.f.config.claude_profiles = self.f.profiles[1:]  # c deliberately absent: excluded profile
+        result = self.observe()
+        self.assertEqual(result, {"status": "refused", "reason": "unproven-source-environment", "mutated": False})
+        self.assertEqual(self.f.quota.calls, [])
+        self.assertFalse((self.f.state / "observations").exists())
+
+    def test_observe_pi_friendly_error_with_100_proves_witness(self):
+        temp = TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        fixture = Fixture(temp.name, route="pi")
+        fixture.config.enabled, fixture.config.observe_only = False, True
+        fixture.quota.codex = codex_payload(100)
+        result = fixture.engine.handle_event({"pane_id": "source-pane"})
+        self.assertEqual(result["status"], "observed")
+        self.assertEqual(fixture.os.kills, [])
+        self.assertEqual(fixture.cli.created + fixture.cli.started + fixture.cli.prompts, [])
+        self.assertEqual(fixture.quota.calls, [])
+
+    def test_observe_pi_same_429_wording_under_100_no_record(self):
+        temp = TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        fixture = Fixture(temp.name, route="pi")
+        fixture.config.enabled, fixture.config.observe_only = False, True
+        fixture.quota.codex = codex_payload(40)  # same friendly text, not genuine exhaustion
+        result = fixture.engine.handle_event({"pane_id": "source-pane"})
+        self.assertEqual(result["status"], "refused")
+        self.assertEqual(result["reason"], "unproven-pi-exhaustion")
+        self.assertEqual(fixture.quota.calls, [])
+        self.assertFalse((fixture.state / "observations").exists())
+
+    def test_observe_account_hold_or_stale_error_is_no_evidence(self):
+        temp = TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        fixture = Fixture(temp.name, route="pi")
+        fixture.quota.codex = codex_payload(100)
+        fixture.events[-1]["message"]["errorMessage"] = "Your account is currently on hold"
+        fixture.save_events()
+        fixture.config.enabled, fixture.config.observe_only = False, True
+        result = fixture.engine.handle_event({"pane_id": "source-pane"})
+        self.assertEqual(result["status"], "refused")
+        self.assertFalse((fixture.state / "observations").exists())
+        stale = copy.deepcopy(fixture.events)
+        stale[-1]["message"]["errorMessage"] = PI_FRIENDLY
+        stale[-1]["timestamp"] = iso(NOW - 3600)
+        fixture.events = stale
+        fixture.save_events()
+        result = fixture.engine.handle_event({"pane_id": "source-pane"})
+        self.assertEqual(result["status"], "refused")
+        self.assertFalse((fixture.state / "observations").exists())
+
+    def test_malformed_json_observation_fails_closed(self):
+        self.observe()
+        path = self.observation_path()
+        path.write_text("{not json")
+        result = self.f.event()
+        self.assertEqual(result, {"status": "refused", "reason": "corrupt-receipt", "mutated": False})
+        self.assertEqual(path.read_text(), "{not json")
+
+    def test_corrupt_observation_fails_closed(self):
+        self.observe()
+        path = self.observation_path()
+        for corrupt in ("{not json", "[]", "null", "0", "3.14", '"text"', "true",
+                        '{}', '{"version": 1}', '{"version": 2, "event_key": "x"}',
+                        '{"version": 1, "event_key": "x", "source_token": 1, "evidence_token": null}'):
+            with self.subTest(corrupt=corrupt):
+                path.write_text(corrupt)
+                result = self.f.engine.handle_event({"pane_id": "source-pane"})
+                self.assertEqual(result, {"status": "refused", "reason": "corrupt-receipt", "mutated": False})
+                self.assertEqual(path.read_text(), corrupt)  # never overwritten
+        # Exact-schema mutations: a dict with only version/key/tokens, missing or
+        # extra fields, wrong types and non-hex tokens must all fail closed.
+        self.observation_path().unlink()  # clear the raw-corruption leftovers
+        self.observe()  # write a genuine record to mutate
+        record = json.loads(self.observation_path().read_text())
+        def broken(change):
+            value = copy.deepcopy(record)
+            change(value)
+            return json.dumps(value)
+        mutations = {
+            "tokens-only": lambda v: [v.pop(k) for k in ("observed_at", "error_timestamp", "source")] and None,
+            "missing-version": lambda v: v.pop("version") and None,
+            "extra-field": lambda v: v.update(extra=1) or None,
+            "version-bool": lambda v: v.update(version=True) or None,
+            "version-float": lambda v: v.update(version=1.0) or None,
+            "observed-at-string": lambda v: v.update(observed_at="soon") or None,
+            "observed-at-bool": lambda v: v.update(observed_at=True) or None,
+            "error-timestamp-null": lambda v: v.update(error_timestamp=None) or None,
+            "source-missing": lambda v: v.pop("source") and None,
+            "source-extra": lambda v: v["source"].update(cwd="/x") or None,
+            "source-id-number": lambda v: v["source"].update(pane_id=7) or None,
+            "source-agent-empty": lambda v: v["source"].update(agent="") or None,
+            "token-not-hex": lambda v: v.update(source_token="z" * 64) or None,
+            "token-short": lambda v: v.update(evidence_token="ab" * 31) or None,
+            "wrong-event-key": lambda v: v.update(event_key="f" * 64) or None,
+        }
+        for name, change in mutations.items():
+            with self.subTest(mutation=name):
+                path.write_text(broken(change))
+                result = self.f.engine.handle_event({"pane_id": "source-pane"})
+                self.assertEqual(result, {"status": "refused", "reason": "corrupt-receipt", "mutated": False})
+
+    def test_observe_guard_refuses_without_observation_mode(self):
+        det = self.f.engine.detect_exhausted(self.f.cli.source)
+        with self.assertRaises(qh.HandoffError):
+            self.f.engine._observe(det, qh.event_key(self.f.cli.source))
+        self.no_control()
+
+    def test_duplicate_pi_observation_zero_additional_quota_calls(self):
+        temp = TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        fixture = Fixture(temp.name, route="pi")
+        fixture.config.enabled, fixture.config.observe_only = False, True
+        fixture.quota.codex = codex_payload(100)
+        fixture.cli.live = PI_FRIENDLY + "\n────────────────\n" + str(fixture.cwd) + "\n2.1k · 98% (openai-codex) gpt-6.1-sol • high"
+        auth_calls, codex_calls = [], []
+        real_auth, real_codex = fixture.quota.pi_auth_check, fixture.quota.codex_windows
+        fixture.quota.pi_auth_check = lambda: (auth_calls.append(1), real_auth())[1]
+        fixture.quota.codex_windows = lambda now: (codex_calls.append(1), real_codex(now))[1]
+        first = fixture.engine.handle_event({"pane_id": "source-pane"})
+        self.assertEqual(first["status"], "observed")
+        self.assertEqual((len(auth_calls), len(codex_calls)), (1, 1))
+        second = fixture.engine.handle_event({"pane_id": "source-pane"})
+        self.assertEqual(second["status"], "already-observed")
+        self.assertFalse(second["mutated"])
+        self.assertEqual((len(auth_calls), len(codex_calls)), (1, 1))  # unchanged
+        self.assertEqual(fixture.quota.calls, [])
+
+    def test_duplicate_observation_idempotent(self):
+        self.assertEqual(self.observe()["status"], "observed")
+        path = self.observation_path()
+        before, calls = path.read_text(), len(self.f.quota.calls)
+        second = self.f.event()
+        self.assertEqual(second["status"], "already-observed")
+        self.assertFalse(second["mutated"])
+        self.assertEqual(path.read_text(), before)
+        self.assertEqual(len(self.f.quota.calls), calls)
+        self.no_control(second)
+
+    def test_control_legacy_exactly_one_stop_and_create(self):
+        result = self.f.event()
+        self.assertTrue(result["mutated"])
+        self.assertEqual(self.f.os.kills, [(10, signal.SIGSTOP)])
+        self.assertEqual(len(self.f.cli.created), 1)
+        self.assertEqual(len(self.f.cli.started), 1)
+
+    def test_observer_branch_proves_no_control_path_runs(self):
+        def forbidden(*args, **kwargs):
+            raise AssertionError("control path executed in observer mode")
+        engine, os_port, quota = self.f.engine, self.f.os, self.f.quota
+        for target in (engine._handoff, engine.exclude_source, engine.choose_destination,
+                       engine.capacity_at_use, os_port.killpg, quota.claude_usage):
+            object.__setattr__(engine if target in (engine._handoff, engine.exclude_source,
+                                                    engine.choose_destination, engine.capacity_at_use) else
+                               (os_port if target is os_port.killpg else quota),
+                               target.__name__, forbidden)
+        result = self.observe()
+        self.assertEqual(result["status"], "observed")
+        mutating = [a for a in self.f.cli.argvs if a[1:3] in (("tab", "create"), ("agent", "start"), ("agent", "prompt")) or a[1] == "notification"]
+        self.assertEqual(mutating, [])
+
+    def test_handoff_direct_call_cannot_bypass_mask(self):
+        key = qh.event_key(self.f.cli.source)
+        for enabled, observe in ((False, False), (False, True)):
+            with self.subTest(mode=(enabled, observe)):
+                self.f.config.enabled, self.f.config.observe_only = enabled, observe
+                with self.assertRaises(qh.HandoffError):
+                    self.f.engine._handoff(self.f.cli.source, key)
+                self.no_control()
+
+    def test_mark_public_blocked_in_observation_mode(self):
+        self.f.config.auto_prompt_template = {"authority": AUTHORITY, "text": "{checkpoint}"}
+        self.observe()
+        result = self.f.engine.mark_public("source-pane", self.f.checkpoint())
+        self.assertEqual(result, {"status": "disabled", "mutated": False})
+        self.assertFalse((self.f.state / "markers").exists())
+
+    def test_status_dicts_exact_per_mode(self):
+        self.assertEqual(self.f.engine.status(), {"enabled": True, "status": "enabled"})
+        self.assertEqual(self.observe()["status"], "observed")
+        self.assertEqual(self.f.engine.status(), {"enabled": False, "status": "observing",
+                                                  "observe_only": True, "observation_count": 1})
+        self.f.config.enabled = self.f.config.observe_only = False
+        self.assertEqual(self.f.engine.status(), {"enabled": False, "status": "disabled"})
+
+    def test_old_config_fallback_enables_no_controls(self):
+        path = self.f.root / "handoff.json"
+        profiles = [{"name": p["name"], "config_dir": p["config_dir"]} for p in self.f.profiles]
+        write_json(path, {"enabled": False, "observe_only": True, "allowed_workspaces": ["ws1"],
+                          "claude_profiles": profiles, "authority": AUTHORITY})
+        engine = qh.QuotaHandoffEngine(qh.HandoffConfig.load(path), self.f.engine.herdr, self.f.quota,
+                                       self.f.os, self.f.state)
+        result = engine.handle_event({"pane_id": "source-pane"})
+        self.assertEqual(result["status"], "observed")
+        self.assertFalse(result["mutated"])
+        self.assertEqual(self.f.os.kills, [])
+        self.assertEqual(self.f.cli.created + self.f.cli.started + self.f.cli.prompts, [])
+        self.assertEqual(self.f.receipt(), None)
 
 
 if __name__ == "__main__":

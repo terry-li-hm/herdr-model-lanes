@@ -1,5 +1,6 @@
 {
   "enabled": false,
+  "observe_only": false,
   "allowed_workspaces": ["vivesca"],
   "claude_profiles": [
     {"name": "c", "config_dir": "~/.claude"},

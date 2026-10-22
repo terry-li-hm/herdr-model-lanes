@@ -1,14 +1,19 @@
 # Quota handoff
 
-Status: experimental and disabled. Offline verification is separate from live
-positive acceptance. On 22 October 2026 a clean, restricted native test reproduced
-a real usage limit without loading work context. A later request returned
-`account_on_hold`. The controller correctly made no handoff. Live positive
-acceptance and activation remain pending. The held `c4` profile is excluded from
-the staged host configuration until the owner reviews it directly with Claude.
-No account restriction may be treated as a usage limit or bypassed by rotation.
+Status: experimental. Automatic control is disabled by default. Passive
+observation can collect a genuine quota witness while control remains disabled.
+Offline verification and observation are separate from live handoff acceptance.
+Account restrictions must never be treated as usage limits or bypassed by rotation.
 
 Quota handoff opens a replacement top-level cockpit when a supported Claude or Pi session reaches a confirmed subscription usage limit. It is disabled until the owner supplies `handoff.json` in the Model Lanes plugin config directory. This is a Linux-only control feature. The existing quota display and launch-time router remain independent.
+
+## Passive observation
+
+Set `enabled` to `false` and `observe_only` to `true` to record future genuine limits without stopping a process, creating a tab, submitting a prompt or changing account exclusions. Only configured native profiles are eligible for observation. Pi observations also require fresh official subscription evidence that a relevant window is exhausted. Excluded accounts are not probed. No notifications are sent.
+
+The controller writes a private, content-free witness under `handoff/observations/`. Records contain safe source IDs, timestamps and evidence hashes. They contain no task text, terminal output, transcript path, environment or credentials. Duplicate evidence does not create another record. `status` reports observation mode and the number of recorded witnesses.
+
+The two mode flags are deliberately separate. `enabled: true` with `observe_only: false` allows control. `enabled: false` with `observe_only: true` allows observation. Both false disables everything. Both true or invalid flag types fail closed. An older installation that ignores `observe_only` still sees `enabled: false` and cannot control a source. An observation is evidence, not permission to activate handoff.
 
 ## Routing policy
 
@@ -51,7 +56,7 @@ python3 quota_handoff.py reconcile --pane <pane-id>
 
 ## Recovery and rollback
 
-Set `enabled` to `false` in `handoff.json` to prevent new handoffs. Existing source processes stay parked and existing replacement tabs stay open. Inspect the receipt and both sessions before deciding which one owns the task. Only after confirming that the successor has stopped should the owner consider resuming an original process group. Verify PID start times before using any saved process ID. This tool deliberately provides no automatic thaw or close command.
+Set `enabled` to `false` in `handoff.json` to prevent new handoffs. Set `observe_only` to `false` as well to stop passive observation. Existing source processes stay parked and existing replacement tabs stay open. Inspect the receipt and both sessions before deciding which one owns the task. Only after confirming that the successor has stopped should the owner consider resuming an original process group. Verify PID start times before using any saved process ID. This tool deliberately provides no automatic thaw or close command.
 
 A Herdr server restart is not a tested recovery mechanism for parked agents. Do not restart Herdr to resolve an ambiguous handoff. Reconcile the original and successor first.
 
@@ -71,4 +76,4 @@ ruff check quota_handoff.py tests/test_quota_handoff.py
 
 Fake quota and Herdr adapters must prove routing, refusal, process identity, parking order, duplicate suppression and ambiguous-failure behavior without touching a real user tab. A Linux integration case creates one owned synthetic child, exercises the real `SIGSTOP` and `/proc` verification path, proves duplicate suppression, then terminates and reaps only that child. Its native-agent and Herdr metadata remain explicitly synthetic.
 
-On 22 October 2026 the full suite passed 427 tests, including 174 focused handoff cases. All changed Python files passed Ruff. A clean native probe reproduced the real usage-limit format; a later account-hold response produced zero handoff actions. Live positive acceptance remains pending. Test totals and a synthetic process test do not prove a real quota-exhaustion handoff.
+Observer tests must prove that stop, create, start, prompt, account-exclusion and notification paths are unreachable, including through direct control-method calls. They must cover real-source corroboration, excluded profiles, generic throttling, stale evidence, malformed configuration, corrupt journals, duplicate suppression and privacy of recorded fields. Test totals, passive observations and a synthetic process test do not prove a completed real quota-exhaustion handoff.

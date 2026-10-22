@@ -42,7 +42,18 @@ MAX_AGE = 120
 UUID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\Z")
 NOTICE = re.compile(r"^\s*(?:⚠[\ufe0e\ufe0f]?\s*)?(?:you have hit your (?:(?:session|weekly) )?limit\b|you['’]ve hit your (?:(?:session|weekly) )?limit\b|usage limit reached\b|you have reached your (?:(?:session|weekly|usage) )?limit\b|usage_limit_reached\b)", re.IGNORECASE)
 PI_NOTICE = re.compile(r"^\s*(?:Error:\s*)?you have hit your ChatGPT usage limit\b", re.IGNORECASE)
-FOOTER = re.compile(r"^\s*(?:Continuing automatically at .+ · esc to cancel · /usage-credits to continue now|Automatically resuming .+|[─━\-]{3,}|[❯>]\s*|\? for shortcuts|(?:Opus|Sonnet|Fable) [\d.]+(?:\s*[·|].*)?|(?:⏵⏵|▸▸) (?:accept edits|bypass permissions).*|⏸[\ufe0e\ufe0f]? plan mode on \(shift\+tab to cycle\))\s*$", re.IGNORECASE)
+FOOTER = re.compile(r"^\s*(?:Continuing automatically at .+ · esc to cancel · /usage-credits to continue now|Automatically resuming .+|[─━\-]{3,}|[❯>]\s*|\? for shortcuts|(?:Opus|Sonnet|Fable) [\d.]+(?:\s*[·|].*)?|(?:⏵⏵|▸▸) (?:accept edits|bypass permissions).*|(?:⏵⏵|▸▸) auto mode on \(shift\+tab to cycle\) · ← for agents|⏸[\ufe0e\ufe0f]? plan mode on \(shift\+tab to cycle\))\s*$", re.IGNORECASE)
+# Pi TUI status footer: separator rules are FOOTER's; the agent line is the exact
+# cwd and the stats line must end with the exact provider/model/effort suffix.
+PI_STAT_TOKEN = r"(?:\$ ?)?\d[\d.,]*[kKmM]?(?:\s?%)?(?: ?(?:tok|tokens|turns|credits))?"
+PI_STATS_FOOTER = re.compile(r"^\s*" + PI_STAT_TOKEN + r"(?:\s*·\s*" + PI_STAT_TOKEN
+                              + r")*\s*·?\s*\(openai-codex\) gpt-6\.1-sol • high\s*$")
+# Pi 1.4.0 owned custom input-widget frame: top border carries the EXACT cwd
+# basename (checked separately), the input line must be blank, the bottom border
+# is pinned to the model plus a known thinking level. Border length varies.
+PI_INPUT_TOP = re.compile(r"^╭─+ \S+ ╮$")
+PI_INPUT_BLANK = re.compile(r"^│❯ *│$")
+PI_INPUT_BOTTOM = re.compile(r"^╰ gpt-6\.1-sol • (?:high|medium|low|minimal) ─+╯$")
 # Values of these keys are NEVER returned/read as credential values.
 OVERRIDE_KEYS = frozenset({
     "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
@@ -137,6 +148,36 @@ def tail_notice(text, *, pi=False):
     hits = [i for i, line in enumerate(lines) if NOTICE.match(line) or (pi and PI_NOTICE.match(line))]
     return bool(hits) and all(not line.strip() or FOOTER.fullmatch(line)
                               for line in lines[hits[-1] + 1:])
+
+
+def pi_tail_notice(text, cwd):
+    """Agent-aware tail filter for the Pi TUI only: after the error line, only
+    generic separators, the agent's EXACT cwd, and the exact status footer line
+    are tolerated. Any other (user/queued/draft) text refuses the terminal match.
+    tail_notice itself stays strict and unchanged."""
+    if not isinstance(text, str) or not isinstance(cwd, str) or not os.path.isabs(cwd):
+        return False
+    lines = text.splitlines()
+    hits = [i for i, line in enumerate(lines) if NOTICE.match(line) or PI_NOTICE.match(line)]
+    if not hits:
+        return False
+    basename = os.path.basename(cwd.rstrip("/"))
+    for line in lines[hits[-1] + 1:]:
+        stripped = line.strip()
+        if not stripped or FOOTER.fullmatch(line):
+            continue
+        if stripped == cwd:
+            continue
+        if PI_STATS_FOOTER.fullmatch(line):
+            continue
+        if PI_INPUT_TOP.fullmatch(stripped):
+            if stripped[stripped.index(" ", 1) + 1:stripped.rindex(" ")] == basename:
+                continue
+            return False
+        if PI_INPUT_BLANK.fullmatch(stripped) or PI_INPUT_BOTTOM.fullmatch(stripped):
+            continue
+        return False
+    return True
 
 
 def parse_window(value, now, *, codex=False, unused=False, exhausted=False):
@@ -305,6 +346,7 @@ class HandoffConfig:
     launch_cwd_allowlist: list = field(default_factory=list)
     test_source_allowlist: list = field(default_factory=list)
     test_claude_launch_args: list = field(default_factory=list)
+    observe_only: bool = False
 
     @classmethod
     def load(cls, path):
@@ -316,8 +358,8 @@ class HandoffConfig:
         except (OSError, ValueError, HandoffError, TypeError):
             return cls()
 
-    def authorized(self):
-        return (self.enabled is True and isinstance(self.allowed_workspaces, list)
+    def _authorized_fields(self):
+        return (isinstance(self.allowed_workspaces, list)
                 and bool(self.allowed_workspaces) and all(isinstance(x, str) and x for x in self.allowed_workspaces)
                 and isinstance(self.authority, dict)
                 and all(isinstance(self.authority.get(k), str) and self.authority[k].strip()
@@ -330,6 +372,15 @@ class HandoffConfig:
                 and self.claude_model == CLAUDE_MODEL and self.pi_provider == DEFAULT_PI_PROVIDER
                 and self.pi_model == DEFAULT_PI_MODEL and _finite(self.minimum_remaining_percent)
                 and 5 <= self.minimum_remaining_percent <= 100)
+
+    def authorized(self):
+        # Control mode: enabled=True + observe_only=False, exact legacy behavior.
+        return self.enabled is True and self.observe_only is False and self._authorized_fields()
+
+    def observation_authorized(self):
+        # Observation-only mode: authorizes witnessing, never any mutation.
+        # Both true, both false or nonbool values all fail closed.
+        return self.enabled is False and self.observe_only is True and self._authorized_fields()
 
     def profiles(self):
         if not isinstance(self.claude_profiles, list):
@@ -737,6 +788,23 @@ class QuotaPort:
                 process.wait(timeout=1)
 
 
+def valid_observation(value, key):
+    """Exact schema: no missing/extra fields, strict types, 64-hex tokens."""
+    if not isinstance(value, dict) or set(value) != {"version", "event_key", "observed_at",
+                                                    "error_timestamp", "source", "source_token", "evidence_token"}:
+        return False
+    if type(value["version"]) is not int or value["version"] != 1 or value["event_key"] != key:
+        return False
+    if not all(_finite(value[k]) for k in ("observed_at", "error_timestamp")):
+        return False
+    source = value["source"]
+    if (not isinstance(source, dict) or set(source) != {"pane_id", "tab_id", "workspace_id", "agent"}
+            or not all(isinstance(source[k], str) and source[k] for k in source)):
+        return False
+    return all(isinstance(value[k], str) and re.fullmatch(r"[0-9a-f]{64}", value[k])
+               for k in ("source_token", "evidence_token"))
+
+
 def session_token(agent):
     session = agent.get("agent_session")
     if (not isinstance(session, dict) or session.get("agent") != agent.get("agent")
@@ -920,7 +988,15 @@ class QuotaHandoffEngine:
         self.receipts = ReceiptStore(self.state_dir) if self.state_dir else None
 
     def operational(self):
-        return self.config.authorized() and self.os.platform == "linux" and self.state_dir is not None
+        return ((self.config.authorized() or self.config.observation_authorized())
+                and self.os.platform == "linux" and self.state_dir is not None)
+
+    def can_control(self):
+        """Only operational control mode (enabled, not observe_only) may mutate."""
+        return self.operational() and self.config.authorized()
+
+    def can_observe(self):
+        return self.operational() and self.config.observation_authorized()
 
     def global_invocation_lock(self):
         private_dir(self.state_dir)
@@ -979,7 +1055,11 @@ class QuotaHandoffEngine:
         second = self.herdr.agent_snapshot(candidate["pane_id"])
         for snapshot in (first, second):
             agent = snapshot.get("agent")
-            if identity(agent) != identity(candidate) or not tail_notice(snapshot.get("text"), pi=agent["agent"] == "pi"):
+            if identity(agent) != identity(candidate):
+                return None
+            pi = agent["agent"] == "pi"
+            if not (pi_tail_notice(snapshot.get("text"), agent["cwd"]) if pi
+                    else tail_notice(snapshot.get("text"))):
                 return None
             if agent.get("agent_status") not in ("idle", "blocked", "done", "working"):
                 return None
@@ -1170,6 +1250,61 @@ class QuotaHandoffEngine:
             raise HandoffError("no current exact-source quota error")
         return group, path, sid, config_dir, metadata
 
+    def observation_count(self):
+        """Count valid observation names only; never read payloads."""
+        try:
+            names = os.listdir(self.state_dir / "observations")
+        except OSError:
+            return 0
+        return min(sum(1 for name in names if re.fullmatch(r"[0-9a-f]{64}\.json", name)), 256)
+
+    def _observe(self, agent, key):
+        """Content-free witness collection. No probe of excluded profiles, no helper,
+        no exclusion/quota-cache change, no pane input, no notification, no stop."""
+        if not self.can_observe():
+            raise HandoffError("observation mode not authorized")
+        _group, _path, _sid, config_dir, metadata = self.source_proof(agent)
+        if agent["agent"] == "claude" and config_dir not in {p["config_dir"] for p in self.config.profiles()}:
+            raise HandoffError("unproven native source environment")  # unknown/excluded profile
+        # Build tokens and settle duplicates BEFORE any Pi probe: a matching
+        # witness re-observed must trigger zero additional quota calls.
+        source_token = digest(identity(agent))
+        evidence_token = digest({"error": metadata["error"], "last_user": metadata["last_user"]})
+        path = self.state_dir / "observations" / (key + ".json")
+        missing = object()
+        try:
+            existing = json.loads(read_file(path, 65536, private=True))
+        except FileNotFoundError:
+            existing = missing  # only a truly missing file may be written
+        except (OSError, ValueError, HandoffError):
+            raise HandoffError("corrupt receipt") from None
+        if existing is not missing:
+            # Every existing record must be a valid observation schema; null,
+            # scalars, arrays or wrong schema all fail closed without overwrite.
+            if not valid_observation(existing, key):
+                raise HandoffError("corrupt receipt")  # any invalid schema fails closed
+            if (existing["source_token"] == source_token
+                    and existing["evidence_token"] == evidence_token):
+                return {"status": "already-observed", "mutated": False, "observed": True,
+                        "source_pane": agent["pane_id"]}
+        if agent["agent"] == "pi":
+            server = self.os.launch_environment()
+            if server is None or server["env"].get("overrides") or not launch_settings_safe(server["env"], agent["cwd"]):
+                raise HandoffError("unproven server launch environment")
+            self.quota.probe_home = server["env"]["HOME"]
+            if not validate_pi_auth(self.quota.pi_auth_check()):
+                raise HandoffError("unproven Pi subscription")
+            # Friendly 429 text alone is not genuine exhaustion: official snapshot
+            # must currently show an applicable 100% window.
+            if validate_codex_snapshot(self.quota.codex_windows(self.os.now()), self.os.now(), exhausted=True) is None:
+                raise HandoffError("unproven Pi subscription exhaustion")
+        observation = {"version": 1, "event_key": key, "observed_at": self.os.now(),
+                       "error_timestamp": metadata["error"]["timestamp"],
+                       "source": {k: agent[k] for k in ("pane_id", "tab_id", "workspace_id", "agent")},
+                       "source_token": source_token, "evidence_token": evidence_token}
+        atomic_json(path, observation)
+        return {"status": "observed", "mutated": False, "observed": True, "source_pane": agent["pane_id"]}
+
     def handle_event(self, event):
         if not self.operational():
             return {"status": "disabled", "mutated": False}
@@ -1192,6 +1327,8 @@ class QuotaHandoffEngine:
                     return {"status": "quarantined", "reason": "corrupt-receipt", "mutated": False}
                 detected = self.detect_exhausted(candidate)
                 if detected is not None:
+                    if self.can_observe():
+                        return self._observe(detected, key)
                     return self._handoff(detected, key)
             return {"status": "no-exhausted-source", "mutated": False}
         except (HandoffError, OSError, ValueError, TypeError, KeyError) as exc:
@@ -1200,6 +1337,8 @@ class QuotaHandoffEngine:
             os.close(guard)
 
     def _handoff(self, agent, key):
+        if not self.can_control():
+            raise HandoffError("handoff control not authorized")
         receipt, mutated = None, False
         try:
             group, _path, _sid, cd, metadata = self.source_proof(agent)
@@ -1230,7 +1369,10 @@ class QuotaHandoffEngine:
                 self.exclude_source(cd, "pi", self.os.now())
             # Recheck *after* all potentially slow quota probes, immediately before intent/STOP.
             fresh = self.herdr.agent_snapshot(agent["pane_id"])
-            if identity(fresh["agent"]) != identity(agent) or not tail_notice(fresh.get("text"), pi=agent["agent"] == "pi") or not self.single_pane(agent):
+            if (identity(fresh["agent"]) != identity(agent)
+                    or not (pi_tail_notice(fresh.get("text"), agent["cwd"]) if agent["agent"] == "pi"
+                            else tail_notice(fresh.get("text")))
+                    or not self.single_pane(agent)):
                 raise HandoffError("source identity drift")
             current = self.source_proof(agent)
             if current[0] != group or current[4] != metadata or self.os.launch_environment() != server:
@@ -1333,7 +1475,7 @@ class QuotaHandoffEngine:
         return hashlib.sha256(raw).hexdigest(), value["checkpoint"]
 
     def mark_public(self, pane_id, checkpoint=None):
-        if not self.operational():
+        if not self.can_control():
             return {"status": "disabled", "mutated": False}
         if not checkpoint:
             return {"status": "checkpoint-required", "mutated": False}
@@ -1403,6 +1545,9 @@ class QuotaHandoffEngine:
         self.receipts.save(key, receipt)
 
     def status(self):
+        if self.can_observe():
+            return {"enabled": False, "status": "observing", "observe_only": True,
+                    "observation_count": self.observation_count()}
         return {"enabled": self.operational(), "status": "enabled" if self.operational() else "disabled"}
 
     def scan(self, own_pane=None):

@@ -24,6 +24,12 @@
 
 ### Added
 
+- Passive quota observation with automatic control disabled. The opt-in
+  `observe_only` flag records private source IDs, timestamps and evidence hashes
+  after exact-session corroboration. It never parks sessions, launches agents,
+  forwards task content, changes account exclusions or sends notifications.
+  The `enabled` control flag remains false, including on older installations.
+
 - Experimental, disabled-by-default Linux quota handoff for configured Claude
   profiles and Pi with GPT-6.1 Sol. It checks exact-session errors, independent
   account capacity and process identity before parking a source and preparing

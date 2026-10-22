@@ -76,6 +76,12 @@ phases and destination references, but no terminal text, transcript content or
 credentials. Those private receipts have owner-only permissions and must stay
 outside the public checkout.
 
+Passive observation uses `enabled: false` and `observe_only: true`. It may
+record corroborated, content-free quota evidence for configured sources, but it
+cannot stop a process, create a tab, submit a prompt, change account exclusions
+or send notifications. Unknown or contradictory mode flags fail closed. The
+control flag stays false so older installations cannot activate accidentally.
+
 Control requires a confirmed current usage-limit error and stable process
 identity. The source process group is stopped before a replacement is created.
 The controller never closes or automatically resumes the original. Ambiguous
