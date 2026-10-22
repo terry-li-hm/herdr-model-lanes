@@ -62,6 +62,31 @@ therefore experimental, available on macOS (Keychain) and Linux (credentials
 file). If it breaks, the plugin degrades to
 `Cl n/a` and keeps reporting Codex, which is official and cross-platform.
 
+## Opt-in quota handoff
+
+`quota_handoff.py` is a separate Linux-only control feature. It is disabled
+without explicit configuration and a workspace allowlist. It uses the existing
+Claude credential helper with isolated per-account state and the official local
+Codex app-server. It does not read credential files or print provider responses.
+
+The handoff controller may inspect bounded terminal output and structured error
+metadata from an exact Claude or Pi session file. It does not recursively search
+transcript stores. Runtime receipts contain session and process identifiers,
+phases and destination references, but no terminal text, transcript content or
+credentials. Those private receipts have owner-only permissions and must stay
+outside the public checkout.
+
+Control requires a confirmed current usage-limit error and stable process
+identity. The source process group is stopped before a replacement is created.
+The controller never closes or automatically resumes the original. Ambiguous
+mutations are quarantined. New sessions receive no task prompt by default;
+protected or unknown work requires the owner's confirmation in the replacement.
+An explicit session-and-task-bound public marker permits one Pi continuation
+from a private owner-authored unclassified checkpoint. Native successors never
+receive an automatic task prompt. Full transcripts are never forwarded. See
+[quota handoff](QUOTA_HANDOFF.md)
+for the operational boundary and recovery procedure.
+
 ## Reporting a vulnerability
 
 Please open a private security advisory on this repository (GitHub:

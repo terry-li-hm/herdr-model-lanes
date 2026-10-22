@@ -24,6 +24,15 @@
 
 ### Added
 
+- Experimental, disabled-by-default Linux quota handoff for configured Claude
+  profiles and Pi with GPT-6.1 Sol. It checks exact-session errors, independent
+  account capacity and process identity before parking a source and preparing
+  one unfocused successor. Native successors always await confirmation. Pi
+  can continue only from an explicit private unclassified checkpoint. Account
+  holds, generic throttling, unknown identity and ambiguous mutations never
+  authorize automatic continuation. Live positive acceptance remains pending;
+  see `QUOTA_HANDOFF.md` before enabling.
+
 - Claude Max usage now comes primarily from the documented Claude Code
   `statusLine` feed. The new `claude_statusline.py` collector (launched via
   `bin/claude-statusline`) reads at most 1 MiB of status-line JSON from

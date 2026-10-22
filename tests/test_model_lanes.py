@@ -739,12 +739,27 @@ class ManifestTests(unittest.TestCase):
         manifest = tomllib.loads(Path("herdr-plugin.toml").read_text())
 
         self.assertEqual(manifest["id"], "terry.herdr-model-lanes")
-        self.assertEqual(manifest["version"], "3.8.0")
-        self.assertEqual(manifest["min_herdr_version"], "0.8.0")
+        self.assertEqual(manifest["version"], "3.9.0")
+        self.assertEqual(manifest["min_herdr_version"], "0.9.5")
         self.assertEqual(manifest["platforms"], ["macos", "linux"])
         self.assertNotIn("build", manifest)
+        self.assertNotIn("daemon", manifest)
+        self.assertNotIn("schedule", manifest)
         action_ids = [item["id"] for item in manifest["actions"]]
-        self.assertIn("route-high", action_ids)
+        self.assertCountEqual(action_ids, [
+            "refresh", "clear", "route-medium", "route-high", "route-explain",
+            "handoff-status", "handoff-check",
+        ])
+        expected_handoff_actions = [
+            {"id": "handoff-status", "title": "Show quota handoff status",
+             "command": ["python3", "quota_handoff.py", "status"]},
+            {"id": "handoff-check", "title": "Check for confirmed usage-limit handoffs",
+             "command": ["python3", "quota_handoff.py", "event"]},
+        ]
+        self.assertEqual(
+            [item for item in manifest["actions"] if item["id"].startswith("handoff-")],
+            expected_handoff_actions,
+        )
         route_high = next(
             item for item in manifest["actions"] if item["id"] == "route-high"
         )
@@ -755,11 +770,23 @@ class ManifestTests(unittest.TestCase):
         self.assertTrue(
             all("on" in event and "event" not in event for event in manifest["events"])
         )
+        self.assertEqual(manifest["startup"], [
+            {"command": ["python3", "herdr_model_lanes.py"]},
+        ])
+        self.assertEqual(manifest["events"], [
+            {"on": "workspace.focused", "command": ["python3", "herdr_model_lanes.py"]},
+            {"on": "pane.agent_status_changed", "command": ["python3", "herdr_model_lanes.py"]},
+            {"on": "pane.agent_status_changed", "command": ["python3", "quota_handoff.py", "event"]},
+        ])
         commands = []
         for section in ("startup", "actions", "events"):
             commands.extend(item["command"] for item in manifest.get(section, []))
+        expected_handoff_commands = [item["command"] for item in expected_handoff_actions]
         for command in commands:
-            self.assertEqual(command[0:2], ["python3", "herdr_model_lanes.py"])
+            if command[0:2] == ["python3", "quota_handoff.py"]:
+                self.assertIn(command, expected_handoff_commands)
+            else:
+                self.assertEqual(command[0:2], ["python3", "herdr_model_lanes.py"])
 
 
 if __name__ == "__main__":

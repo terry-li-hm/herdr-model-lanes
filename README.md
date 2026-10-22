@@ -1,6 +1,6 @@
 # herdr-model-lanes
 
-Herdr 0.8 plugin that shows the remaining weekly subscription capacity for
+Herdr plugin that shows the remaining weekly subscription capacity for
 **ChatGPT Codex** and **Claude Max** in the focused workspace row. A normal
 value looks like:
 
@@ -220,7 +220,10 @@ a Herdr notification (non-fatal without Herdr); `--launch` additionally
 creates the tab, echoes the rationale line into the new pane, and starts
 the agent; `--argv` prints the chosen lane's shell-quoted command on stdout
 with the rationale on stderr and needs no Herdr environment. Routing
-happens once at launch; nothing re-routes a running pane.
+happens once at launch. The separate, opt-in [quota handoff](QUOTA_HANDOFF.md)
+feature handles confirmed subscription exhaustion in existing top-level cockpits.
+It supports configured Claude login profiles and Pi with GPT-6.1 Sol on Linux,
+keeps originals parked, and preserves the confirmation gate for protected tasks.
 
 ### `ag`
 
@@ -277,7 +280,8 @@ two weeks after landing, delete the route action.
 
 ## Installation
 
-Requirements: Python 3.11+, Herdr 0.8+, and `codex` on `PATH`. Claude usage prefers the Claude Code `statusLine` feed — set
+Requirements for this checkout: Python 3.11+, Herdr 0.9.5+, and `codex` on `PATH`.
+The pinned v3.8.0 release below retains its Herdr 0.8+ minimum. Claude usage prefers the Claude Code `statusLine` feed — set
 Claude Code's `statusLine` command to `bin/claude-statusline` from this
 repository; the endpoint fallback additionally requires macOS with the
 Claude Code CLI signed in, or Linux with

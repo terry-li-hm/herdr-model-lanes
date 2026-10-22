@@ -1,0 +1,39 @@
+{
+  "native_claude_error": {
+    "type": "assistant",
+    "isApiErrorMessage": true,
+    "error": "rate_limit",
+    "timestamp": "2026-10-22T07:48:00.000Z",
+    "message": {
+      "role": "assistant",
+      "content": [
+        {"type": "text", "text": "You've hit your session limit · resets 4:40pm (Asia/Hong_Kong)"}
+      ]
+    }
+  },
+  "terminal_footer": "────────────────────────────────\n❯\n────────────────────────────────\n  ⚠ Usage limit reached · limit resets 4:40pm\n    Continuing automatically at 4:40pm · esc to cancel · /usage-credits to continue now\n  ⏸ plan mode on (shift+tab to cycle)",
+  "codex": {
+    "account_read": {"account": {"type": "chatgpt", "planType": "pro"}, "requiresOpenaiAuth": true},
+    "rate_limits_read": {
+      "ordinaryUsageAllowed": true,
+      "rateLimits": {
+        "limitId": "codex",
+        "primary": {"usedPercent": 12, "windowDurationMins": 10080, "resetsAt": 1793082763},
+        "secondary": null,
+        "spendControlReached": false,
+        "planType": "pro",
+        "rateLimitReachedType": null
+      },
+      "rateLimitsByLimitId": {
+        "codex": {
+          "limitId": "codex",
+          "primary": {"usedPercent": 12, "windowDurationMins": 10080, "resetsAt": 1793082763},
+          "secondary": null,
+          "spendControlReached": false,
+          "planType": "pro",
+          "rateLimitReachedType": null
+        }
+      }
+    }
+  }
+}

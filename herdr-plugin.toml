@@ -1,7 +1,7 @@
 id = "terry.herdr-model-lanes"
 name = "Model Lanes"
-version = "3.8.0"
-min_herdr_version = "0.8.0"
+version = "3.9.0"
+min_herdr_version = "0.9.5"
 description = "Show Codex, Claude Max, Grok, GLM, Antigravity, Kimi Code, and Cursor subscription capacity in the focused workspace row, and route new agent tabs to a model class lane by remaining quota. Claude support is experimental: it reads the documented Claude Code statusLine feed via bin/claude-statusline and falls back to the macOS Keychain or Linux credentials file plus an undocumented Anthropic endpoint."
 platforms = ["macos", "linux"]
 
@@ -43,3 +43,17 @@ command = ["python3", "herdr_model_lanes.py"]
 [[events]]
 on = "pane.agent_status_changed"
 command = ["python3", "herdr_model_lanes.py"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["python3", "quota_handoff.py", "event"]
+
+[[actions]]
+id = "handoff-status"
+title = "Show quota handoff status"
+command = ["python3", "quota_handoff.py", "status"]
+
+[[actions]]
+id = "handoff-check"
+title = "Check for confirmed usage-limit handoffs"
+command = ["python3", "quota_handoff.py", "event"]
