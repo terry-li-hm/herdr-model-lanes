@@ -1,5 +1,6 @@
 """Tests for the Claude Code status-line quota collector."""
 
+import hashlib
 import io
 import json
 import os
@@ -97,6 +98,7 @@ class StatePathPrecedenceTests(unittest.TestCase):
                 "HERDR_PLUGIN_STATE_DIR",
                 "MODEL_LANES_STATE_DIR",
                 "XDG_STATE_HOME",
+                "CLAUDE_CONFIG_DIR",
             )
         }
         env.update({k: v for k, v in overrides.items() if v is not None})
@@ -154,7 +156,7 @@ class CollectorMainTests(unittest.TestCase):
         env = {
             key: value
             for key, value in os.environ.items()
-            if key != "HERDR_PLUGIN_STATE_DIR"
+            if key not in ("HERDR_PLUGIN_STATE_DIR", "CLAUDE_CONFIG_DIR")
         }
         env["HERDR_PLUGIN_STATE_DIR"] = str(self.state)
         self._env = env
@@ -443,3 +445,126 @@ class ScopedLimitRenderTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"HERDR_PLUGIN_STATE_DIR": tmp}):
                 line = collector.render_status_line({"model": "Fable"}, None, None, now)
         self.assertEqual(line, "Fable | 5h n/a | 7d n/a")
+
+
+class ProfileScopedCacheTests(unittest.TestCase):
+    """A non-default CLAUDE_CONFIG_DIR must not collide with ~/.claude."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.state = Path(self._tmp.name)
+
+    def _env(self, **overrides: str | None) -> dict[str, str]:
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key
+            not in (
+                "HERDR_PLUGIN_STATE_DIR",
+                "MODEL_LANES_STATE_DIR",
+                "XDG_STATE_HOME",
+                "CLAUDE_CONFIG_DIR",
+            )
+        }
+        env.update({k: v for k, v in overrides.items() if v is not None})
+        return env
+
+    def _run(self, stdin_bytes: bytes) -> tuple:
+        with _Stdio(stdin_bytes) as stdio:
+            rc = collector.main([])
+            output = stdio.stdout_text
+            errors = stdio.stderr_text
+        return rc, output, errors
+
+    def test_unset_or_default_config_dir_uses_root_state(self) -> None:
+        for config_dir in (None, "~/.claude"):
+            with self.subTest(claude_config_dir=config_dir), mock.patch.dict(
+                os.environ,
+                self._env(
+                    HERDR_PLUGIN_STATE_DIR=str(self.state),
+                    CLAUDE_CONFIG_DIR=config_dir,
+                ),
+            ):
+                self.assertEqual(
+                    collector.statusline_cache_path(),
+                    self.state / "claude-statusline.json",
+                )
+
+    def test_non_default_profile_keys_into_profiles_subdir(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            self._env(
+                HERDR_PLUGIN_STATE_DIR=str(self.state),
+                CLAUDE_CONFIG_DIR="~/.claude-account3",
+            ),
+        ):
+            expected = self.state / "profiles" / ".claude-account3" / "claude-statusline.json"
+            self.assertEqual(collector.statusline_cache_path(), expected)
+            self.assertEqual(
+                collector.root_statusline_cache_path(),
+                self.state / "claude-statusline.json",
+            )
+
+    def test_non_home_config_dir_keys_by_sanitized_basename_and_digest(self) -> None:
+        raw = "/opt/claude/team profile"
+        digest = hashlib.sha256(os.path.normpath(raw).encode("utf-8")).hexdigest()[:12]
+        expected = self.state / "profiles" / f"team_profile-{digest}" / "claude-statusline.json"
+        with mock.patch.dict(
+            os.environ, self._env(HERDR_PLUGIN_STATE_DIR=str(self.state))
+        ):
+            self.assertEqual(collector.statusline_cache_path(config_dir=raw), expected)
+
+    def test_already_scoped_state_dir_does_not_double_nest(self) -> None:
+        for leaf in ("profiles/.claude-account3", "profile-abc"):
+            with self.subTest(leaf=leaf):
+                scoped = str(self.state / leaf)
+                with mock.patch.dict(
+                    os.environ,
+                    self._env(
+                        HERDR_PLUGIN_STATE_DIR=scoped,
+                        CLAUDE_CONFIG_DIR="~/.claude-account3",
+                    ),
+                ):
+                    self.assertEqual(
+                        collector.statusline_cache_path(),
+                        Path(scoped) / "claude-statusline.json",
+                    )
+
+    def test_main_writes_profile_cache_and_root_cache(self) -> None:
+        env = self._env(
+            HERDR_PLUGIN_STATE_DIR=str(self.state),
+            CLAUDE_CONFIG_DIR="~/.claude-account3",
+        )
+        payload = json.dumps(
+            _payload(five_hour=_live_window(10), seven_day=_live_window(20))
+        ).encode()
+        with mock.patch.dict(os.environ, env):
+            rc, _output, errors = self._run(payload)
+
+        self.assertEqual(rc, 0)
+        self.assertNotIn("warning", errors)
+        profile_cache = self.state / "profiles" / ".claude-account3" / "claude-statusline.json"
+        root_cache = self.state / "claude-statusline.json"
+        for path in (profile_cache, root_cache):
+            self.assertTrue(path.exists(), path)
+            cached = json.loads(path.read_text())
+            self.assertEqual(cached["five_hour"]["utilization"], 10)
+            self.assertEqual(cached["seven_day"]["utilization"], 20)
+        self.assertEqual(stat.S_IMODE(profile_cache.stat().st_mode), 0o600)
+
+        scoped_limit = profile_cache.with_name("claude-scoped-limit.json")
+        now = int(time.time())
+        scoped_limit.write_text(
+            json.dumps(
+                {
+                    "scope": "Fable",
+                    "utilization": 5.0,
+                    "resets_at": now + 3600,
+                    "fetched_at": now - 60,
+                }
+            )
+        )
+        with mock.patch.dict(os.environ, env):
+            loaded = collector.load_scoped_limit(now)
+        self.assertEqual(loaded["scope"], "Fable")

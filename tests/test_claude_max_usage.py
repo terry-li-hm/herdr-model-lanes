@@ -441,7 +441,12 @@ class StatuslineCachePathTests(unittest.TestCase):
             key: value
             for key, value in os.environ.items()
             if key
-            not in ("HERDR_PLUGIN_STATE_DIR", "MODEL_LANES_STATE_DIR", "XDG_STATE_HOME")
+            not in (
+                "HERDR_PLUGIN_STATE_DIR",
+                "MODEL_LANES_STATE_DIR",
+                "XDG_STATE_HOME",
+                "CLAUDE_CONFIG_DIR",
+            )
         }
         env.update({k: v for k, v in overrides.items() if v is not None})
         return env
@@ -495,7 +500,7 @@ class StatuslineCacheTests(unittest.TestCase):
         env = {
             key: value
             for key, value in os.environ.items()
-            if key != "HERDR_PLUGIN_STATE_DIR"
+            if key not in ("HERDR_PLUGIN_STATE_DIR", "CLAUDE_CONFIG_DIR")
         }
         env["HERDR_PLUGIN_STATE_DIR"] = self._tmp.name
         patcher = mock.patch.dict(os.environ, env)
@@ -714,7 +719,160 @@ class ScopedLimitTests(unittest.TestCase):
             path = os.path.join(tmp, "claude-scoped-limit.json")
             helper.save_scoped_limit({"scope": "Fable", "utilization": 76.0, "resets_at": 1789290000}, 1788950000, path)
             self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
-            self.assertEqual(json.load(open(path)), {"scope": "Fable", "utilization": 76.0, "resets_at": 1789290000, "fetched_at": 1788950000})
+            with open(path) as handle:
+                self.assertEqual(json.load(handle), {"scope": "Fable", "utilization": 76.0, "resets_at": 1789290000, "fetched_at": 1788950000})
             self.assertEqual(helper._scoped_cache_age(1788950900, path), 900)
             helper.save_scoped_limit(None, 1788950000, path)
             self.assertFalse(os.path.exists(path))
+
+
+class ProfileScopedStatuslineTests(unittest.TestCase):
+    """A non-default CLAUDE_CONFIG_DIR must not collide with ~/.claude."""
+
+    def _env(self, **overrides) -> dict:
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key
+            not in (
+                "HERDR_PLUGIN_STATE_DIR",
+                "MODEL_LANES_STATE_DIR",
+                "XDG_STATE_HOME",
+                "CLAUDE_CONFIG_DIR",
+            )
+        }
+        env.update({k: v for k, v in overrides.items() if v is not None})
+        return env
+
+    def test_profile_config_dir_keys_statusline_and_scoped_paths(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            self._env(
+                HERDR_PLUGIN_STATE_DIR="/state/a",
+                CLAUDE_CONFIG_DIR="~/.claude-account5",
+            ),
+        ):
+            self.assertEqual(
+                helper.statusline_cache_path(),
+                os.path.join(
+                    "/state/a", "profiles", ".claude-account5", "claude-statusline.json"
+                ),
+            )
+            self.assertEqual(
+                helper.scoped_cache_path(),
+                os.path.join(
+                    "/state/a", "profiles", ".claude-account5", "claude-scoped-limit.json"
+                ),
+            )
+
+    def test_default_config_dir_keeps_root_paths(self) -> None:
+        for config_dir in (None, "~/.claude"):
+            with self.subTest(claude_config_dir=config_dir), mock.patch.dict(
+                os.environ,
+                self._env(
+                    HERDR_PLUGIN_STATE_DIR="/state/a",
+                    CLAUDE_CONFIG_DIR=config_dir,
+                ),
+            ):
+                self.assertEqual(
+                    helper.statusline_cache_path(),
+                    "/state/a/claude-statusline.json",
+                )
+
+    def test_already_scoped_state_dir_does_not_double_nest(self) -> None:
+        for leaf in ("profiles/.claude-account5", "profile-123"):
+            with self.subTest(leaf=leaf), mock.patch.dict(
+                os.environ,
+                self._env(
+                    HERDR_PLUGIN_STATE_DIR=os.path.join("/state/a", leaf),
+                    CLAUDE_CONFIG_DIR="~/.claude-account5",
+                ),
+            ):
+                self.assertEqual(
+                    helper.statusline_cache_path(),
+                    os.path.join("/state/a", leaf, "claude-statusline.json"),
+                )
+
+    def test_root_fresh_cache_does_not_short_circuit_profile_main(self) -> None:
+        now = int(time.time())
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "claude-statusline.json"), "w") as handle:
+                json.dump(
+                    {
+                        "captured_at": now - 60,
+                        "five_hour": None,
+                        "seven_day": {"utilization": 80, "resets_at": now + 86400},
+                    },
+                    handle,
+                )
+            profile_cache = os.path.join(
+                tmp, "profiles", ".claude-account5", "claude-statusline.json"
+            )
+            os.makedirs(os.path.dirname(profile_cache), exist_ok=True)
+            with open(profile_cache, "w") as handle:
+                json.dump(
+                    {
+                        "captured_at": now - 30,
+                        "five_hour": {"utilization": 7, "resets_at": now + 3600},
+                        "seven_day": {"utilization": 40, "resets_at": now + 86400},
+                    },
+                    handle,
+                )
+            with mock.patch.dict(
+                os.environ,
+                self._env(
+                    HERDR_PLUGIN_STATE_DIR=tmp,
+                    CLAUDE_CONFIG_DIR="~/.claude-account5",
+                ),
+            ), mock.patch(
+                "claude_max_usage.read_oauth_token",
+                side_effect=AssertionError("credential access must not happen"),
+            ), mock.patch(
+                "claude_max_usage.fetch_usage",
+                side_effect=AssertionError("network access must not happen"),
+            ), mock.patch(
+                "sys.stdout", new_callable=lambda: io.StringIO()
+            ) as out:
+                rc = helper.main([])
+
+        self.assertEqual(rc, 0)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["seven_day"]["utilization"], 40)
+        self.assertEqual(payload["five_hour"]["utilization"], 7)
+
+    def test_profile_main_fresh_fetch_ignores_root_cache(self) -> None:
+        now = int(time.time())
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "claude-statusline.json"), "w") as handle:
+                json.dump(
+                    {
+                        "captured_at": now - 60,
+                        "five_hour": None,
+                        "seven_day": {"utilization": 80, "resets_at": now + 86400},
+                    },
+                    handle,
+                )
+            with mock.patch.dict(
+                os.environ,
+                self._env(
+                    HERDR_PLUGIN_STATE_DIR=tmp,
+                    CLAUDE_CONFIG_DIR="~/.claude-account5",
+                ),
+            ), mock.patch(
+                "claude_max_usage.read_oauth_token", return_value=SYNTHETIC_TOKEN
+            ), mock.patch(
+                "claude_max_usage.fetch_usage"
+            ) as fetch, mock.patch(
+                "sys.stdout", new_callable=lambda: io.StringIO()
+            ) as out:
+                fetch.return_value = {
+                    "five_hour": None,
+                    "seven_day": {"utilization": 9, "resets_at": "2026-08-23T08:59:59Z"},
+                    "seven_day_sonnet": None,
+                }
+                rc = helper.main([])
+
+        self.assertEqual(rc, 0)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["seven_day"]["utilization"], 9)
+        fetch.assert_called_once()

@@ -11,14 +11,16 @@ exception messages, or files.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
+import re
 import stat
 import subprocess
 import sys
-import time
 import tempfile
+import time
 import urllib.request
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -194,7 +196,7 @@ def _iso_to_epoch(value: object) -> int | None:
         return None
     try:
         from datetime import datetime
-        return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
+        return int(datetime.fromisoformat(value).timestamp())
     except ValueError:
         return None
 
@@ -264,7 +266,8 @@ def _scoped_cache_age(now: int, path: str | None = None) -> int | None:
     if path is None:
         path = scoped_cache_path()
     try:
-        document = json.loads(open(path, "rb").read(MAX_RESPONSE_BYTES).decode("utf-8"))
+        with open(path, "rb") as handle:
+            document = json.loads(handle.read(MAX_RESPONSE_BYTES).decode("utf-8"))
         fetched_at = document.get("fetched_at")
     except (OSError, ValueError, UnicodeDecodeError, AttributeError):
         return None
@@ -317,17 +320,71 @@ def fetch_usage(
     return windows
 
 
-def statusline_cache_path() -> str:
-    """Resolve the status-line cache path with the same precedence as ``ag``."""
-    base = os.environ.get("HERDR_PLUGIN_STATE_DIR") or os.environ.get(
+def _profile_subdir(config_dir: str | os.PathLike[str] | None = None) -> str | None:
+    """Profile-keyed state subdir for a non-default CLAUDE_CONFIG_DIR.
+
+    Returns None for the default ``~/.claude`` profile and for a blank
+    setting, so those keep using the root state directory. A sibling of the
+    home directory (``~/.claude-account2``) keys by basename; any other
+    directory is keyed by a sanitized basename plus a path digest.
+    """
+    raw = (
+        os.fspath(config_dir)
+        if config_dir is not None
+        else os.environ.get("CLAUDE_CONFIG_DIR", "")
+    )
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    norm = os.path.normpath(os.path.expanduser(raw.strip()))
+    default_cfg = os.path.normpath(os.path.join(os.path.expanduser("~"), ".claude"))
+    if norm == default_cfg:
+        return None
+    home_norm = os.path.normpath(os.path.expanduser("~"))
+    base = os.path.basename(norm)
+    if (
+        os.path.dirname(norm) == home_norm
+        and re.fullmatch(r"\.?[A-Za-z0-9._-]+", base)
+        and base not in (".", "..")
+    ):
+        return os.path.join("profiles", base)
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", base).strip("._") or "profile"
+    digest = hashlib.sha256(norm.encode("utf-8")).hexdigest()[:12]
+    return os.path.join("profiles", f"{safe}-{digest}")
+
+
+def _already_profile_scoped(base_dir: str) -> bool:
+    """True when base_dir is already a per-profile state directory.
+
+    Callers such as quota_handoff.py pass a ``.../profile-<hash>`` state dir
+    and claude-pick passes ``.../profiles/<config-basename>``; those must not
+    get a second ``profiles/`` level appended.
+    """
+    norm_base = os.path.normpath(base_dir)
+    return (
+        os.path.basename(os.path.dirname(norm_base)) == "profiles"
+        or os.path.basename(norm_base).startswith("profile-")
+    )
+
+
+def statusline_cache_path(config_dir: str | os.PathLike[str] | None = None) -> str:
+    """Resolve the status-line cache path with the same precedence as ``ag``.
+
+    A non-default ``CLAUDE_CONFIG_DIR`` keys the cache under ``profiles/``
+    so concurrent profiles never read or overwrite each other's cache.
+    """
+    base_dir = os.environ.get("HERDR_PLUGIN_STATE_DIR") or os.environ.get(
         "MODEL_LANES_STATE_DIR"
     )
-    if base:
-        return os.path.join(base, STATUSLINE_CACHE_FILENAME)
-    xdg = os.environ.get("XDG_STATE_HOME") or os.path.join(
-        os.path.expanduser("~"), ".local", "state"
-    )
-    return os.path.join(xdg, STATUSLINE_PLUGIN_ID_PATH, STATUSLINE_CACHE_FILENAME)
+    if not base_dir:
+        xdg = os.environ.get("XDG_STATE_HOME") or os.path.join(
+            os.path.expanduser("~"), ".local", "state"
+        )
+        base_dir = os.path.join(xdg, STATUSLINE_PLUGIN_ID_PATH)
+    if not _already_profile_scoped(base_dir):
+        sub = _profile_subdir(config_dir)
+        if sub is not None:
+            base_dir = os.path.join(base_dir, sub)
+    return os.path.join(base_dir, STATUSLINE_CACHE_FILENAME)
 
 
 def _read_cache_file(path: str) -> bytes | None:

@@ -19,9 +19,11 @@ only when no downstream ran or the downstream failed.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -42,21 +44,88 @@ class StatuslineError(Exception):
     """Raised on collector failure; messages never echo stdin content."""
 
 
-def statusline_cache_path(
-    state_dir: str | os.PathLike[str] | None = None,
-) -> Path:
-    """Resolve the cache path with the same precedence as ``bin/ag``."""
+def _profile_subdir(config_dir: str | os.PathLike[str] | None = None) -> str | None:
+    """Profile-keyed state subdir for a non-default CLAUDE_CONFIG_DIR.
+
+    Returns None for the default ``~/.claude`` profile and for a blank
+    setting, so those keep using the root state directory. A sibling of the
+    home directory (``~/.claude-account2``) keys by basename; any other
+    directory is keyed by a sanitized basename plus a path digest.
+    """
+    raw = (
+        os.fspath(config_dir)
+        if config_dir is not None
+        else os.environ.get("CLAUDE_CONFIG_DIR", "")
+    )
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    norm = os.path.normpath(os.path.expanduser(raw.strip()))
+    default_cfg = os.path.normpath(os.path.join(os.path.expanduser("~"), ".claude"))
+    if norm == default_cfg:
+        return None
+    home_norm = os.path.normpath(os.path.expanduser("~"))
+    base = os.path.basename(norm)
+    if (
+        os.path.dirname(norm) == home_norm
+        and re.fullmatch(r"\.?[A-Za-z0-9._-]+", base)
+        and base not in (".", "..")
+    ):
+        return os.path.join("profiles", base)
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", base).strip("._") or "profile"
+    digest = hashlib.sha256(norm.encode("utf-8")).hexdigest()[:12]
+    return os.path.join("profiles", f"{safe}-{digest}")
+
+
+def _already_profile_scoped(base_dir: str) -> bool:
+    """True when base_dir is already a per-profile state directory.
+
+    Callers such as quota_handoff.py pass a ``.../profile-<hash>`` state dir
+    and claude-pick passes ``.../profiles/<config-basename>``; those must not
+    get a second ``profiles/`` level appended.
+    """
+    norm_base = os.path.normpath(base_dir)
+    return (
+        os.path.basename(os.path.dirname(norm_base)) == "profiles"
+        or os.path.basename(norm_base).startswith("profile-")
+    )
+
+
+def _base_state_path(state_dir: str | os.PathLike[str] | None = None) -> Path:
+    """Resolve the base state directory with the same precedence as ``ag``."""
     if state_dir is not None:
-        return Path(os.fspath(state_dir)) / CACHE_FILENAME
+        return Path(os.fspath(state_dir))
     base = os.environ.get("HERDR_PLUGIN_STATE_DIR") or os.environ.get(
         "MODEL_LANES_STATE_DIR"
     )
     if base:
-        return Path(base) / CACHE_FILENAME
+        return Path(base)
     xdg = os.environ.get("XDG_STATE_HOME") or os.path.join(
         os.path.expanduser("~"), ".local", "state"
     )
-    return Path(xdg) / PLUGIN_ID_PATH / CACHE_FILENAME
+    return Path(xdg) / PLUGIN_ID_PATH
+
+
+def statusline_cache_path(
+    state_dir: str | os.PathLike[str] | None = None,
+    config_dir: str | os.PathLike[str] | None = None,
+) -> Path:
+    """Resolve the cache path with the same precedence as ``bin/ag``.
+
+    A non-default ``CLAUDE_CONFIG_DIR`` keys the cache under ``profiles/``
+    so concurrent profiles never read or overwrite each other's cache. An
+    explicit ``state_dir`` argument is used as given.
+    """
+    base_path = _base_state_path(state_dir)
+    if state_dir is None and not _already_profile_scoped(str(base_path)):
+        sub = _profile_subdir(config_dir)
+        if sub is not None:
+            base_path = base_path / sub
+    return base_path / CACHE_FILENAME
+
+
+def root_statusline_cache_path(state_dir: str | os.PathLike[str] | None = None) -> Path:
+    """The un-scoped cache path; the global Herdr sidebar reads this one."""
+    return _base_state_path(state_dir) / CACHE_FILENAME
 
 
 def _is_finite_number(value: object) -> bool:
@@ -263,8 +332,9 @@ def main(argv: list[str] | None = None) -> int:
             raise StatuslineError("status-line input is not valid JSON") from exc
         five_hour, seven_day = parse_statusline_document(document, now)
         if seven_day is not None:
+            profile_path = statusline_cache_path()
             try:
-                save_cache(statusline_cache_path(), now, five_hour, seven_day)
+                save_cache(profile_path, now, five_hour, seven_day)
             except OSError:
                 # A cache write failure must never suppress an existing
                 # status line; warn once and keep displaying.
@@ -272,6 +342,17 @@ def main(argv: list[str] | None = None) -> int:
                     "claude statusline warning: cannot persist cache",
                     file=sys.stderr,
                 )
+            root_path = root_statusline_cache_path()
+            if root_path != profile_path:
+                # Keep the global sidebar current with the latest active
+                # profile while each profile's own cache stays isolated.
+                try:
+                    save_cache(root_path, now, five_hour, seven_day)
+                except OSError:
+                    print(
+                        "claude statusline warning: cannot persist cache",
+                        file=sys.stderr,
+                    )
         if downstream and run_downstream(downstream, stdin_bytes):
             return 0
         print(render_status_line(document, five_hour, seven_day, now))
