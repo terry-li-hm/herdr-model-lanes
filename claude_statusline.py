@@ -504,9 +504,12 @@ def render_status_line(
 def windows_are_current(document: object, now: int) -> bool:
     """False when the session is idle, so its windows may be stale.
 
-    Judged by the modification time of ``transcript_path``. A payload with
-    no usable transcript path counts as current, which keeps the behaviour
-    of a harness that does not report one.
+    Judged by the modification time of ``transcript_path``. A session that
+    has not been prompted yet has no transcript file; it holds the windows
+    it was handed at start, so it counts as current only for its first
+    minute, measured by ``cost.total_duration_ms``. A payload with no usable
+    transcript path or duration counts as current, which keeps the behaviour
+    of a harness that does not report them.
     """
     if not isinstance(document, dict):
         return True
@@ -515,6 +518,12 @@ def windows_are_current(document: object, now: int) -> bool:
         return True
     try:
         modified = os.stat(transcript).st_mtime
+    except FileNotFoundError:
+        cost = document.get("cost")
+        running_ms = cost.get("total_duration_ms") if isinstance(cost, dict) else None
+        if not _is_finite_number(running_ms):
+            return True
+        return running_ms <= ACTIVE_TRANSCRIPT_SECS * 1000
     except (OSError, ValueError):
         return True
     return now - modified <= ACTIVE_TRANSCRIPT_SECS

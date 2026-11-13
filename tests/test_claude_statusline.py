@@ -446,6 +446,34 @@ class CollectorMainTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(json.loads(self.cache.read_text())["seven_day"]["utilization"], 30)
 
+    def test_unprompted_session_is_current_only_for_its_first_minute(self) -> None:
+        now = int(time.time())
+        missing = str(self.state / "not-yet-written.jsonl")
+        limit_ms = collector.ACTIVE_TRANSCRIPT_SECS * 1000
+        cases = {
+            limit_ms: True,
+            limit_ms + 1: False,
+            None: True,
+            "9000": True,
+            float("nan"): True,
+        }
+        for running_ms, expected in cases.items():
+            with self.subTest(running_ms=running_ms):
+                document = {"transcript_path": missing, "cost": {"total_duration_ms": running_ms}}
+                self.assertIs(collector.windows_are_current(document, now), expected)
+        self.assertTrue(collector.windows_are_current({"transcript_path": missing}, now))
+
+        idle = _payload(
+            five_hour=_live_window(10),
+            seven_day=_live_window(20),
+            transcript_path=missing,
+            cost={"total_duration_ms": limit_ms * 30},
+        )
+        rc, output, _ = self._run(json.dumps(idle).encode())
+        self.assertEqual(rc, 0)
+        self.assertIn("7d 20%", output)
+        self.assertFalse(self.cache.exists())
+
     def test_unusable_transcript_path_counts_as_current(self) -> None:
         now = int(time.time())
         for transcript in (None, "", 7, "/nonexistent/session.jsonl", "bad\0path"):

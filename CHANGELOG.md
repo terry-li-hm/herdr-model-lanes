@@ -31,7 +31,9 @@
   writes the cache only while the session's transcript has changed within
   the last 60 seconds. An idle session still renders, but can no longer
   overwrite a busier session's newer reading or stamp an old one as fresh.
-  A payload with no usable `transcript_path` is written as before.
+  A session that has not been prompted yet has no transcript, so it writes
+  only during its first minute. A payload with no usable `transcript_path`
+  is written as before.
 - The Herdr sidebar quota display is now two compact rows instead of one
   token. `model_quota_core` carries only the live Codex and Claude weekly
   windows; `model_quota_other` carries only the live tighter Claude
