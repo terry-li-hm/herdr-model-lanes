@@ -11,6 +11,13 @@ cache. Every other input field — ``session_id``, ``model``,
 ``workspace``/``cwd``, transcript paths, prompts — is used only to render a
 status line and is never persisted.
 
+The rendered line reads, left to right: model and reasoning effort, context
+depth in tokens, the 5h and 7d windows, the model-scoped weekly limit when a
+fresh cache holds one, and a short label for a non-default
+``CLAUDE_CONFIG_DIR``. Segments whose source is absent are omitted, so the
+least important ones sit on the right where a narrow terminal truncates
+first. Readings near a limit are coloured unless ``NO_COLOR`` is set.
+
 When arguments follow ``--``, the original stdin bytes are forwarded to that
 exact argv without a shell and with a short timeout; on success the
 downstream command's stdout is passed through unchanged. Rendering happens
@@ -38,6 +45,19 @@ MAX_INPUT_BYTES = 1 << 20
 MAX_CACHE_BYTES = 64 * 1024
 DOWNSTREAM_TIMEOUT_SECS = 1
 MAX_RESET_AHEAD_SECS = 365 * 24 * 60 * 60
+# Context depth is coloured against absolute token counts, because the cost of
+# a deep session follows tokens re-read per call, not the share of the window.
+CONTEXT_WARN_TOKENS = 150_000
+CONTEXT_HIGH_TOKENS = 200_000
+QUOTA_WARN_PERCENT = 70
+QUOTA_HIGH_PERCENT = 90
+# Efforts that drain a subscription quickly enough to deserve a visible flag.
+COSTLY_EFFORT_LEVELS = frozenset({"max"})
+SAME_RESET_TOLERANCE_SECS = 60
+MAX_ACCOUNT_LABEL_CHARS = 12
+ANSI_WARN = "\033[33m"
+ANSI_HIGH = "\033[31m"
+ANSI_RESET = "\033[0m"
 
 
 class StatuslineError(Exception):
@@ -251,19 +271,43 @@ def _countdown(resets_at: int, now: int) -> str:
     return f"{hours // 24}d{hours % 24}h"
 
 
-def _window_text(label: str, window: dict | None, now: int) -> str:
+def _paint(text: str, level: str | None, color: bool) -> str:
+    """Wrap text in the ANSI colour for ``level`` ("warn" or "high")."""
+    if not color or level is None:
+        return text
+    return f"{ANSI_HIGH if level == 'high' else ANSI_WARN}{text}{ANSI_RESET}"
+
+
+def _level(value: float, warn_at: float, high_at: float) -> str | None:
+    if value >= high_at:
+        return "high"
+    if value >= warn_at:
+        return "warn"
+    return None
+
+
+def _window_text(
+    label: str,
+    window: dict | None,
+    now: int,
+    *,
+    countdown: bool = True,
+    color: bool = False,
+) -> str:
     if window is None:
         return f"{label} n/a"
     utilization = window["utilization"]
     percent = int(utilization) if float(utilization).is_integer() else utilization
-    return f"{label} {percent}% ({_countdown(window['resets_at'], now)})"
+    text = f"{label} {percent}%"
+    if countdown:
+        text += f" {_countdown(window['resets_at'], now)}"
+    return _paint(text, _level(utilization, QUOTA_WARN_PERCENT, QUOTA_HIGH_PERCENT), color)
 
 
-def render_status_line(
-    document: object, five_hour: dict | None, seven_day: dict | None, now: int
-) -> str:
-    """Render a concise model plus 5h/7d status line."""
+def _model_text(document: object, color: bool) -> str:
+    """Model display name, followed by the session's reasoning effort."""
     model = "Claude"
+    effort = None
     if isinstance(document, dict):
         model_obj = document.get("model")
         if isinstance(model_obj, dict):
@@ -272,14 +316,101 @@ def render_status_line(
                 model = display
         elif isinstance(model_obj, str) and model_obj:
             model = model_obj
-    parts = [
-        model,
-        _window_text("5h", five_hour, now),
-        _window_text("7d", seven_day, now),
-    ]
+        effort_obj = document.get("effort")
+        if isinstance(effort_obj, dict):
+            level = effort_obj.get("level")
+            if isinstance(level, str) and re.fullmatch(r"[a-z]{1,8}", level):
+                effort = level
+    if effort is None:
+        return model
+    flag = "warn" if effort in COSTLY_EFFORT_LEVELS else None
+    return f"{model} {_paint(effort, flag, color)}"
+
+
+def _context_text(document: object, color: bool) -> str | None:
+    """Context depth as ``ctx 143K``, or None before the first response.
+
+    Uses ``context_window.total_input_tokens``: fresh input plus cache reads
+    and writes from the most recent response, which is what every further
+    call re-reads.
+    """
+    if not isinstance(document, dict):
+        return None
+    window = document.get("context_window")
+    if not isinstance(window, dict):
+        return None
+    tokens = window.get("total_input_tokens")
+    if not _is_finite_number(tokens) or tokens <= 0:
+        return None
+    if tokens >= 999_500:
+        amount = f"{tokens / 1_000_000:.1f}M"
+    else:
+        amount = f"{round(tokens / 1000)}K"
+    return _paint(
+        f"ctx {amount}", _level(tokens, CONTEXT_WARN_TOKENS, CONTEXT_HIGH_TOKENS), color
+    )
+
+
+def _account_label(config_dir: str | os.PathLike[str] | None = None) -> str | None:
+    """Short label for a non-default ``CLAUDE_CONFIG_DIR``; None for the default.
+
+    ``~/.claude-account6`` reads ``a6``. Any other directory reads as its
+    sanitized basename without a leading dot or ``claude-`` prefix.
+    """
+    sub = _profile_subdir(config_dir)
+    if sub is None:
+        return None
+    raw = (
+        os.fspath(config_dir)
+        if config_dir is not None
+        else os.environ.get("CLAUDE_CONFIG_DIR", "")
+    )
+    base = os.path.basename(os.path.normpath(os.path.expanduser(raw.strip())))
+    name = re.sub(r"[^A-Za-z0-9_-]", "", base.lstrip("."))
+    if name.startswith("claude-") and len(name) > len("claude-"):
+        name = name[len("claude-") :]
+    numbered = re.fullmatch(r"account(\d+)", name)
+    if numbered:
+        return f"a{numbered.group(1)}"
+    return name[:MAX_ACCOUNT_LABEL_CHARS] or None
+
+
+def render_status_line(
+    document: object,
+    five_hour: dict | None,
+    seven_day: dict | None,
+    now: int,
+    *,
+    color: bool | None = None,
+) -> str:
+    """Render model, effort, context depth, quota windows and account label.
+
+    ``color`` defaults to on unless the ``NO_COLOR`` environment variable is
+    set to a non-empty value.
+    """
+    if color is None:
+        color = not os.environ.get("NO_COLOR")
     scoped = load_scoped_limit(now)
+    # A scoped weekly limit usually resets with the 7d window; print that
+    # shared countdown once, on the scoped segment.
+    shared_reset = (
+        scoped is not None
+        and seven_day is not None
+        and abs(scoped["resets_at"] - seven_day["resets_at"]) <= SAME_RESET_TOLERANCE_SECS
+    )
+    parts = [_model_text(document, color)]
+    context = _context_text(document, color)
+    if context is not None:
+        parts.append(context)
+    parts.append(_window_text("5h", five_hour, now, color=color))
+    parts.append(
+        _window_text("7d", seven_day, now, countdown=not shared_reset, color=color)
+    )
     if scoped is not None:
-        parts.append(_window_text(scoped["scope"], scoped, now))
+        parts.append(_window_text(scoped["scope"], scoped, now, color=color))
+    account = _account_label()
+    if account is not None:
+        parts.append(account)
     return " | ".join(parts)
 
 

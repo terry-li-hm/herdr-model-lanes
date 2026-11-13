@@ -17,6 +17,18 @@ from unittest import mock
 import claude_statusline as collector
 
 
+def setUpModule() -> None:
+    """Isolate the suite from the launching session's profile and colour setting.
+
+    A session started under a non-default ``CLAUDE_CONFIG_DIR`` would otherwise
+    key every cache path under ``profiles/`` and add an account label.
+    """
+    patcher = mock.patch.dict(os.environ, {"NO_COLOR": "1"})
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
+    os.environ.pop("CLAUDE_CONFIG_DIR", None)
+
+
 def _payload(
     five_hour: object | None = None,
     seven_day: object | None = None,
@@ -435,7 +447,7 @@ class ScopedLimitRenderTests(unittest.TestCase):
                     {"utilization": 38, "resets_at": now + 340000},
                     now,
                 )
-        self.assertEqual(line, "Fable 5.1 | 5h 12% (1h40m) | 7d 38% (3d22h) | Fable 76% (3d22h)")
+        self.assertEqual(line, "Fable 5.1 | 5h 12% 1h40m | 7d 38% | Fable 76% 3d22h")
 
     def test_stale_or_reset_scoped_cache_is_ignored(self) -> None:
         now = 1788950000
@@ -445,6 +457,153 @@ class ScopedLimitRenderTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"HERDR_PLUGIN_STATE_DIR": tmp}):
                 line = collector.render_status_line({"model": "Fable"}, None, None, now)
         self.assertEqual(line, "Fable | 5h n/a | 7d n/a")
+
+
+class RenderSegmentsTests(unittest.TestCase):
+    """Model, effort, context depth, quota windows and account label."""
+
+    NOW = 1788950000
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.state = Path(self._tmp.name)
+        patcher = mock.patch.dict(os.environ, {"HERDR_PLUGIN_STATE_DIR": str(self.state)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _document(self, **extra: object) -> dict:
+        document = {
+            "model": {"display_name": "Fable 5.2"},
+            "effort": {"level": "xhigh"},
+            "context_window": {"total_input_tokens": 143_200, "total_output_tokens": 900},
+        }
+        document.update(extra)
+        return document
+
+    def _render(self, document: object, **kwargs: object) -> str:
+        five_hour = kwargs.pop("five_hour", {"utilization": 40, "resets_at": self.NOW + 7080})
+        seven_day = kwargs.pop("seven_day", {"utilization": 27, "resets_at": self.NOW + 176400})
+        kwargs.setdefault("color", False)
+        return collector.render_status_line(document, five_hour, seven_day, self.NOW, **kwargs)
+
+    def _write_scoped(self, directory: Path, resets_at: int) -> None:
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "claude-scoped-limit.json").write_text(
+            json.dumps(
+                {
+                    "scope": "Fable",
+                    "utilization": 45.0,
+                    "resets_at": resets_at,
+                    "fetched_at": self.NOW - 60,
+                }
+            )
+        )
+
+    def test_full_line_for_a_numbered_account_profile(self) -> None:
+        config_dir = os.path.join(os.path.expanduser("~"), ".claude-account6")
+        self._write_scoped(self.state / "profiles" / ".claude-account6", self.NOW + 176400)
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": config_dir}):
+            line = self._render(self._document())
+        self.assertEqual(
+            line,
+            "Fable 5.2 xhigh | ctx 143K | 5h 40% 1h58m | 7d 27% | Fable 45% 2d1h | a6",
+        )
+        self.assertTrue(line.isascii())
+
+    def test_seven_day_keeps_countdown_when_scoped_limit_resets_separately(self) -> None:
+        self._write_scoped(self.state, self.NOW + 90000)
+        line = self._render(self._document())
+        self.assertEqual(
+            line, "Fable 5.2 xhigh | ctx 143K | 5h 40% 1h58m | 7d 27% 2d1h | Fable 45% 1d1h"
+        )
+
+    def test_absent_or_invalid_context_and_effort_are_omitted(self) -> None:
+        expected = "Fable 5.2 | 5h 40% 1h58m | 7d 27% 2d1h"
+        documents = [
+            {"model": {"display_name": "Fable 5.2"}},
+            self._document(effort=None, context_window=None),
+            self._document(effort={"level": "x high; rm"}, context_window={}),
+            self._document(effort={"level": 3}, context_window={"total_input_tokens": 0}),
+            self._document(effort="max", context_window={"total_input_tokens": float("nan")}),
+            self._document(effort={}, context_window={"total_input_tokens": "143200"}),
+            self._document(effort={"level": ""}, context_window={"total_input_tokens": True}),
+        ]
+        for document in documents:
+            with self.subTest(document=document):
+                self.assertEqual(self._render(document), expected)
+
+    def test_context_depth_formats_thousands_and_millions(self) -> None:
+        cases = {400: "ctx 0K", 1_499: "ctx 1K", 199_600: "ctx 200K", 1_240_000: "ctx 1.2M"}
+        for tokens, expected in cases.items():
+            with self.subTest(tokens=tokens):
+                line = self._render(
+                    self._document(context_window={"total_input_tokens": tokens})
+                )
+                self.assertIn(f"| {expected} |", line)
+
+    def test_readings_near_a_limit_are_coloured(self) -> None:
+        warn, high, reset = collector.ANSI_WARN, collector.ANSI_HIGH, collector.ANSI_RESET
+        line = self._render(
+            self._document(
+                effort={"level": "max"}, context_window={"total_input_tokens": 150_000}
+            ),
+            five_hour={"utilization": 90, "resets_at": self.NOW + 60},
+            seven_day={"utilization": 70, "resets_at": self.NOW + 3600},
+            color=True,
+        )
+        self.assertEqual(
+            line,
+            f"Fable 5.2 {warn}max{reset} | {warn}ctx 150K{reset}"
+            f" | {high}5h 90% 1m{reset} | {warn}7d 70% 1h00m{reset}",
+        )
+        deep = self._render(
+            self._document(context_window={"total_input_tokens": 200_000}), color=True
+        )
+        self.assertIn(f"{high}ctx 200K{reset}", deep)
+
+    def test_calm_readings_carry_no_escape_codes_even_with_colour_on(self) -> None:
+        self.assertNotIn("\033", self._render(self._document(), color=True))
+
+    def test_no_color_environment_variable_disables_colour(self) -> None:
+        document = self._document(context_window={"total_input_tokens": 250_000})
+        with mock.patch.dict(os.environ, {"NO_COLOR": "1"}):
+            plain = self._render(document, color=None)
+        environment = {key: value for key, value in os.environ.items() if key != "NO_COLOR"}
+        with mock.patch.dict(os.environ, environment, clear=True):
+            coloured = self._render(document, color=None)
+        self.assertNotIn("\033", plain)
+        self.assertIn(f"{collector.ANSI_HIGH}ctx 250K", coloured)
+
+    def test_account_label_only_for_a_non_default_profile(self) -> None:
+        home = os.path.expanduser("~")
+        cases = {
+            "": None,
+            os.path.join(home, ".claude"): None,
+            os.path.join(home, ".claude-account2"): "a2",
+            os.path.join(home, ".claude-account12"): "a12",
+            os.path.join(home, ".claude-work"): "work",
+            "/opt/My Profile!": "MyProfile",
+            "/srv/a-very-long-profile-directory-name": "a-very-long-",
+        }
+        for config_dir, expected in cases.items():
+            with self.subTest(config_dir=config_dir):
+                self.assertEqual(collector._account_label(config_dir), expected)
+
+    def test_main_prints_context_and_effort_from_stdin(self) -> None:
+        payload = _payload(
+            five_hour=_live_window(10),
+            seven_day=_live_window(20),
+            effort={"level": "high"},
+            context_window={"total_input_tokens": 61_000, "context_window_size": 1_000_000},
+        )
+        with _Stdio(json.dumps(payload).encode()) as stdio:
+            rc = collector.main([])
+            output = stdio.stdout_text
+        self.assertEqual(rc, 0)
+        self.assertTrue(output.startswith("Opus 4.5 high | ctx 61K | 5h 10% "))
+        cache = json.loads((self.state / "claude-statusline.json").read_text())
+        self.assertEqual(sorted(cache), ["captured_at", "five_hour", "seven_day"])
 
 
 class ProfileScopedCacheTests(unittest.TestCase):

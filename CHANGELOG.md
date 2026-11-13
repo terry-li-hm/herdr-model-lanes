@@ -4,6 +4,16 @@
 
 ### Changed
 
+- The `claude-statusline` line now shows what a session is costing as well
+  as what the plan has left. It reads `Fable 5.2 xhigh | ctx 143K | 5h 40%
+  1h58m | 7d 27% | Fable 45% 2d1h | a6`: the reasoning effort follows the
+  model, `ctx` is the context depth from `context_window.total_input_tokens`,
+  and a short label names a non-default `CLAUDE_CONFIG_DIR`. Countdowns lose
+  their brackets, and the 7d countdown is dropped when the model-scoped limit
+  resets at the same moment and prints it. Segments with no source are
+  omitted. Quota readings turn yellow at 70% and red at 90%, context depth
+  at 150K and 200K tokens, and `max` effort is yellow; `NO_COLOR` turns the
+  colours off. The persisted cache is unchanged.
 - The Herdr sidebar quota display is now two compact rows instead of one
   token. `model_quota_core` carries only the live Codex and Claude weekly
   windows; `model_quota_other` carries only the live tighter Claude
