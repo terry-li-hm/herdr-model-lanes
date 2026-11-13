@@ -27,6 +27,7 @@ def setUpModule() -> None:
     patcher.start()
     unittest.addModuleCleanup(patcher.stop)
     os.environ.pop("CLAUDE_CONFIG_DIR", None)
+    os.environ.pop("COLUMNS", None)
 
 
 def _payload(
@@ -574,6 +575,63 @@ class RenderSegmentsTests(unittest.TestCase):
             coloured = self._render(document, color=None)
         self.assertNotIn("\033", plain)
         self.assertIn(f"{collector.ANSI_HIGH}ctx 250K", coloured)
+
+    def _render_at(self, columns: int | None, **kwargs: object) -> str:
+        config_dir = os.path.join(os.path.expanduser("~"), ".claude-account6")
+        self._write_scoped(self.state / "profiles" / ".claude-account6", self.NOW + 176400)
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": config_dir}):
+            return self._render(kwargs.pop("document", self._document()), columns=columns, **kwargs)
+
+    def test_detail_is_shed_in_order_as_the_terminal_narrows(self) -> None:
+        # Usable width is columns minus the four-column margin.
+        cases = {
+            None: "Fable 5.2 xhigh | ctx 143K | 5h 40% 1h58m | 7d 27% | Fable 45% 2d1h | a6",
+            76: "Fable 5.2 xhigh | ctx 143K | 5h 40% 1h58m | 7d 27% | Fable 45% 2d1h | a6",
+            75: "Fable 5.2 xhigh | ctx 143K | 5h 40% 1h58m | 7d 27% | Fable 45% 2d1h",
+            70: "Fable 5.2 xhigh | ctx 143K | 5h 40% 1h58m | 7d 27% | Fable 45%",
+            65: "Fable 5.2 xhigh | 143K | 5h 40% 1h58m | 7d 27% | Fable 45%",
+            61: "Fable 5.2 xhigh | 143K | 5h 40% | 7d 27% | Fable 45%",
+            55: "Fable 5.2 xhigh 143K 5h 40% 7d 27% Fable 45%",
+            47: "Fable 5.2 143K 5h 40% 7d 27% Fable 45%",
+            41: "143K 5h 40% 7d 27% Fable 45%",
+            12: "143K 5h 40% 7d 27% Fable 45%",
+        }
+        for columns, expected in cases.items():
+            with self.subTest(columns=columns):
+                line = self._render_at(columns)
+                self.assertEqual(line, expected)
+                if columns is not None and columns >= 32:
+                    self.assertLessEqual(
+                        len(line), columns - collector.STATUS_LINE_MARGIN_COLUMNS
+                    )
+
+    def test_colour_codes_do_not_count_towards_the_width(self) -> None:
+        document = self._document(context_window={"total_input_tokens": 212_000})
+        plain = self._render_at(76, document=document)
+        coloured = self._render_at(76, document=document, color=True)
+        self.assertEqual(
+            plain, "Fable 5.2 xhigh | ctx 212K | 5h 40% 1h58m | 7d 27% | Fable 45% 2d1h | a6"
+        )
+        self.assertEqual(
+            coloured.replace(collector.ANSI_HIGH, "").replace(collector.ANSI_RESET, ""), plain
+        )
+
+    def test_costly_effort_survives_the_narrowest_terminal(self) -> None:
+        line = self._render_at(20, document=self._document(effort={"level": "max"}))
+        self.assertEqual(line, "max 143K 5h 40% 7d 27% Fable 45%")
+
+    def test_columns_come_from_the_environment_and_bad_values_are_ignored(self) -> None:
+        full = self._render_at(None)
+        for raw, expected in {
+            "61": "Fable 5.2 xhigh | 143K | 5h 40% | 7d 27% | Fable 45%",
+            "": full,
+            "0": full,
+            "-5": full,
+            "wide": full,
+            "99999": full,
+        }.items():
+            with self.subTest(raw=raw), mock.patch.dict(os.environ, {"COLUMNS": raw}):
+                self.assertEqual(self._render_at(None), expected)
 
     def test_account_label_only_for_a_non_default_profile(self) -> None:
         home = os.path.expanduser("~")

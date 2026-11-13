@@ -14,6 +14,15 @@
   omitted. Quota readings turn yellow at 70% and red at 90%, context depth
   at 150K and 200K tokens, and `max` effort is yellow; `NO_COLOR` turns the
   colours off. The persisted cache is unchanged.
+- The `claude-statusline` line now fits the terminal. Claude Code exports
+  the width as `COLUMNS`, and a line wider than that width less a
+  four-column margin sheds detail in a fixed order until it fits: the
+  account label, the weekly countdowns, the `ctx` label, the 5h countdown,
+  the bar separators, the effort and finally the model name. A 62-column
+  split reads `Fable 5.2 xhigh | 143K | 5h 40% 1h58m | 7d 27% | Fable 45%`
+  and a 45-column phone pane reads `Fable 5.2 143K 5h 40% 7d 27% Fable 45%`. The
+  percentages and context depth are never shed, `max` effort always stays,
+  and with no usable `COLUMNS` the full line is printed as before.
 - The Herdr sidebar quota display is now two compact rows instead of one
   token. `model_quota_core` carries only the live Codex and Claude weekly
   windows; `model_quota_other` carries only the live tighter Claude

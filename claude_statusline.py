@@ -18,6 +18,12 @@ fresh cache holds one, and a short label for a non-default
 least important ones sit on the right where a narrow terminal truncates
 first. Readings near a limit are coloured unless ``NO_COLOR`` is set.
 
+Claude Code exports the terminal width as ``COLUMNS``. When the full line
+would not fit, detail is shed in a fixed order until it does: the account
+label, the weekly countdowns, the ``ctx`` label, the 5h countdown, the bar
+separators, the effort and finally the model name. The percentages and the
+context depth are never shed, so a phone-width pane still shows them.
+
 When arguments follow ``--``, the original stdin bytes are forwarded to that
 exact argv without a shell and with a short timeout; on success the
 downstream command's stdout is passed through unchanged. Rendering happens
@@ -55,6 +61,21 @@ QUOTA_HIGH_PERCENT = 90
 COSTLY_EFFORT_LEVELS = frozenset({"max"})
 SAME_RESET_TOLERANCE_SECS = 60
 MAX_ACCOUNT_LABEL_CHARS = 12
+# Claude Code indents the line by two columns and truncates two short of the
+# right edge, so the usable width is COLUMNS minus this margin.
+STATUS_LINE_MARGIN_COLUMNS = 4
+MIN_PLAUSIBLE_COLUMNS = 10
+MAX_PLAUSIBLE_COLUMNS = 2000
+# Detail shed, in order, when the line is wider than the terminal.
+WIDTH_REDUCTIONS = (
+    "account",
+    "weekly_countdown",
+    "context_label",
+    "five_hour_countdown",
+    "bar_separator",
+    "effort",
+    "model",
+)
 ANSI_WARN = "\033[33m"
 ANSI_HIGH = "\033[31m"
 ANSI_RESET = "\033[0m"
@@ -286,26 +307,22 @@ def _level(value: float, warn_at: float, high_at: float) -> str | None:
     return None
 
 
-def _window_text(
-    label: str,
-    window: dict | None,
-    now: int,
-    *,
-    countdown: bool = True,
-    color: bool = False,
-) -> str:
+def _window_segment(
+    label: str, window: dict | None, now: int, *, countdown: bool = True
+) -> tuple[str, str | None]:
+    """One quota window as (text, colour level)."""
     if window is None:
-        return f"{label} n/a"
+        return f"{label} n/a", None
     utilization = window["utilization"]
     percent = int(utilization) if float(utilization).is_integer() else utilization
     text = f"{label} {percent}%"
     if countdown:
         text += f" {_countdown(window['resets_at'], now)}"
-    return _paint(text, _level(utilization, QUOTA_WARN_PERCENT, QUOTA_HIGH_PERCENT), color)
+    return text, _level(utilization, QUOTA_WARN_PERCENT, QUOTA_HIGH_PERCENT)
 
 
-def _model_text(document: object, color: bool) -> str:
-    """Model display name, followed by the session's reasoning effort."""
+def _model_and_effort(document: object) -> tuple[str, str | None]:
+    """Model display name and the session's reasoning effort, if valid."""
     model = "Claude"
     effort = None
     if isinstance(document, dict):
@@ -321,14 +338,11 @@ def _model_text(document: object, color: bool) -> str:
             level = effort_obj.get("level")
             if isinstance(level, str) and re.fullmatch(r"[a-z]{1,8}", level):
                 effort = level
-    if effort is None:
-        return model
-    flag = "warn" if effort in COSTLY_EFFORT_LEVELS else None
-    return f"{model} {_paint(effort, flag, color)}"
+    return model, effort
 
 
-def _context_text(document: object, color: bool) -> str | None:
-    """Context depth as ``ctx 143K``, or None before the first response.
+def _context_tokens(document: object) -> float | None:
+    """Context depth in tokens, or None before the first response.
 
     Uses ``context_window.total_input_tokens``: fresh input plus cache reads
     and writes from the most recent response, which is what every further
@@ -342,13 +356,13 @@ def _context_text(document: object, color: bool) -> str | None:
     tokens = window.get("total_input_tokens")
     if not _is_finite_number(tokens) or tokens <= 0:
         return None
+    return tokens
+
+
+def _context_amount(tokens: float) -> str:
     if tokens >= 999_500:
-        amount = f"{tokens / 1_000_000:.1f}M"
-    else:
-        amount = f"{round(tokens / 1000)}K"
-    return _paint(
-        f"ctx {amount}", _level(tokens, CONTEXT_WARN_TOKENS, CONTEXT_HIGH_TOKENS), color
-    )
+        return f"{tokens / 1_000_000:.1f}M"
+    return f"{round(tokens / 1000)}K"
 
 
 def _account_label(config_dir: str | os.PathLike[str] | None = None) -> str | None:
@@ -375,6 +389,17 @@ def _account_label(config_dir: str | os.PathLike[str] | None = None) -> str | No
     return name[:MAX_ACCOUNT_LABEL_CHARS] or None
 
 
+def _terminal_columns() -> int | None:
+    """Terminal width from ``COLUMNS``, which Claude Code sets per render."""
+    raw = os.environ.get("COLUMNS", "")
+    if not raw.isascii() or not raw.isdigit():
+        return None
+    columns = int(raw)
+    if not MIN_PLAUSIBLE_COLUMNS <= columns <= MAX_PLAUSIBLE_COLUMNS:
+        return None
+    return columns
+
+
 def render_status_line(
     document: object,
     five_hour: dict | None,
@@ -382,15 +407,24 @@ def render_status_line(
     now: int,
     *,
     color: bool | None = None,
+    columns: int | None = None,
 ) -> str:
     """Render model, effort, context depth, quota windows and account label.
 
     ``color`` defaults to on unless the ``NO_COLOR`` environment variable is
-    set to a non-empty value.
+    set to a non-empty value. ``columns`` defaults to the ``COLUMNS``
+    environment variable; when the line is wider than the terminal, detail
+    is shed in ``WIDTH_REDUCTIONS`` order until it fits or nothing is left
+    to shed. With no known width the full line is printed.
     """
     if color is None:
         color = not os.environ.get("NO_COLOR")
+    if columns is None:
+        columns = _terminal_columns()
     scoped = load_scoped_limit(now)
+    model, effort = _model_and_effort(document)
+    tokens = _context_tokens(document)
+    account = _account_label()
     # A scoped weekly limit usually resets with the 7d window; print that
     # shared countdown once, on the scoped segment.
     shared_reset = (
@@ -398,20 +432,62 @@ def render_status_line(
         and seven_day is not None
         and abs(scoped["resets_at"] - seven_day["resets_at"]) <= SAME_RESET_TOLERANCE_SECS
     )
-    parts = [_model_text(document, color)]
-    context = _context_text(document, color)
-    if context is not None:
-        parts.append(context)
-    parts.append(_window_text("5h", five_hour, now, color=color))
-    parts.append(
-        _window_text("7d", seven_day, now, countdown=not shared_reset, color=color)
-    )
-    if scoped is not None:
-        parts.append(_window_text(scoped["scope"], scoped, now, color=color))
-    account = _account_label()
-    if account is not None:
-        parts.append(account)
-    return " | ".join(parts)
+    costly_effort = effort in COSTLY_EFFORT_LEVELS
+
+    def compose(shed: frozenset[str]) -> tuple[list[tuple[str, str | None]], str]:
+        weekly_countdown = "weekly_countdown" not in shed
+        segments: list[tuple[str, str | None]] = []
+        if "model" not in shed:
+            segments.append((model, None))
+        # A costly effort stays visible however narrow the terminal is.
+        if effort is not None and ("effort" not in shed or costly_effort):
+            segments.append((effort, "warn" if costly_effort else None))
+        if tokens is not None:
+            label = "" if "context_label" in shed else "ctx "
+            segments.append(
+                (
+                    f"{label}{_context_amount(tokens)}",
+                    _level(tokens, CONTEXT_WARN_TOKENS, CONTEXT_HIGH_TOKENS),
+                )
+            )
+        segments.append(
+            _window_segment(
+                "5h", five_hour, now, countdown="five_hour_countdown" not in shed
+            )
+        )
+        segments.append(
+            _window_segment(
+                "7d", seven_day, now, countdown=weekly_countdown and not shared_reset
+            )
+        )
+        if scoped is not None:
+            segments.append(
+                _window_segment(scoped["scope"], scoped, now, countdown=weekly_countdown)
+            )
+        if account is not None and "account" not in shed:
+            segments.append((account, None))
+        return segments, " " if "bar_separator" in shed else " | "
+
+    def join(segments: list[tuple[str, str | None]], separator: str, paint: bool) -> str:
+        # Model and effort read as one unit, so only a space ever parts them.
+        pieces = []
+        for index, (text, level) in enumerate(segments):
+            if index:
+                glued = index == 1 and "model" not in shed and segments[1][0] == effort
+                pieces.append(" " if glued else separator)
+            pieces.append(_paint(text, level, paint))
+        return "".join(pieces)
+
+    shed: frozenset[str] = frozenset()
+    segments, separator = compose(shed)
+    if columns is not None:
+        budget = columns - STATUS_LINE_MARGIN_COLUMNS
+        for reduction in WIDTH_REDUCTIONS:
+            if len(join(segments, separator, False)) <= budget:
+                break
+            shed = shed | {reduction}
+            segments, separator = compose(shed)
+    return join(segments, separator, color)
 
 
 def run_downstream(argv: list[str], stdin_bytes: bytes) -> bool:
