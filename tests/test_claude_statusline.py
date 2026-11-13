@@ -403,6 +403,58 @@ class CollectorMainTests(unittest.TestCase):
         )
         self.assertFalse(self.cache.exists())
 
+    def _transcript(self, age_secs: int) -> str:
+        transcript = self.state / "session.jsonl"
+        transcript.write_text("{}\n")
+        stamp = time.time() - age_secs
+        os.utime(transcript, (stamp, stamp))
+        return str(transcript)
+
+    def test_idle_session_renders_but_never_overwrites_the_cache(self) -> None:
+        active = _payload(
+            five_hour=_live_window(45),
+            seven_day=_live_window(30),
+            transcript_path=self._transcript(age_secs=5),
+        )
+        rc, _, _ = self._run(json.dumps(active).encode())
+        self.assertEqual(rc, 0)
+        before = self.cache.read_text()
+
+        idle = _payload(
+            five_hour=_live_window(10),
+            seven_day=_live_window(20),
+            transcript_path=self._transcript(
+                age_secs=collector.ACTIVE_TRANSCRIPT_SECS + 30
+            ),
+        )
+        rc, output, errors = self._run(json.dumps(idle).encode())
+
+        self.assertEqual(rc, 0)
+        self.assertIn("5h 10%", output)
+        self.assertIn("7d 20%", output)
+        self.assertEqual(errors, "")
+        self.assertEqual(self.cache.read_text(), before)
+
+    def test_recently_written_transcript_still_writes_the_cache(self) -> None:
+        payload = _payload(
+            five_hour=_live_window(45),
+            seven_day=_live_window(30),
+            transcript_path=self._transcript(age_secs=collector.ACTIVE_TRANSCRIPT_SECS - 20),
+        )
+        rc, _, _ = self._run(json.dumps(payload).encode())
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(self.cache.read_text())["seven_day"]["utilization"], 30)
+
+    def test_unusable_transcript_path_counts_as_current(self) -> None:
+        now = int(time.time())
+        for transcript in (None, "", 7, "/nonexistent/session.jsonl", "bad\0path"):
+            with self.subTest(transcript=transcript):
+                self.assertTrue(
+                    collector.windows_are_current({"transcript_path": transcript}, now)
+                )
+        self.assertTrue(collector.windows_are_current([], now))
+
     def test_arguments_before_separator_are_a_usage_error(self) -> None:
         rc, _, errors = self._run(b"{}", ["--explain"])
 

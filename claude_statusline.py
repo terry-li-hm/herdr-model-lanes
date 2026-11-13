@@ -9,7 +9,15 @@ plugin state directory. Input windows use the documented
 ``used_percentage`` field, which is normalized to ``utilization`` in the
 cache. Every other input field — ``session_id``, ``model``,
 ``workspace``/``cwd``, transcript paths, prompts — is used only to render a
-status line and is never persisted.
+status line and is never persisted. The transcript file is never read; only
+its modification time is checked.
+
+Claude Code re-runs the command on events, and on a timer when the
+``statusLine`` setting carries a ``refreshInterval``. A timer run in an idle
+session carries the windows from that session's last API response, however
+old. The cache is therefore written only while the session's transcript has
+changed within the last minute, so an idle session can neither overwrite a
+busier session's newer reading nor stamp an old one as fresh.
 
 The rendered line reads, left to right: model and reasoning effort, context
 depth in tokens, the 5h and 7d windows, the model-scoped weekly limit when a
@@ -64,6 +72,9 @@ MAX_ACCOUNT_LABEL_CHARS = 12
 # Claude Code indents the line by two columns and truncates two short of the
 # right edge, so the usable width is COLUMNS minus this margin.
 STATUS_LINE_MARGIN_COLUMNS = 4
+# A session whose transcript has been quiet for longer than this is idle, and
+# the windows in its payload are as old as that quiet period.
+ACTIVE_TRANSCRIPT_SECS = 60
 MIN_PLAUSIBLE_COLUMNS = 10
 MAX_PLAUSIBLE_COLUMNS = 2000
 # Detail shed, in order, when the line is wider than the terminal.
@@ -490,6 +501,25 @@ def render_status_line(
     return join(segments, separator, color)
 
 
+def windows_are_current(document: object, now: int) -> bool:
+    """False when the session is idle, so its windows may be stale.
+
+    Judged by the modification time of ``transcript_path``. A payload with
+    no usable transcript path counts as current, which keeps the behaviour
+    of a harness that does not report one.
+    """
+    if not isinstance(document, dict):
+        return True
+    transcript = document.get("transcript_path")
+    if not isinstance(transcript, str) or not transcript:
+        return True
+    try:
+        modified = os.stat(transcript).st_mtime
+    except (OSError, ValueError):
+        return True
+    return now - modified <= ACTIVE_TRANSCRIPT_SECS
+
+
 def run_downstream(argv: list[str], stdin_bytes: bytes) -> bool:
     """Forward stdin to argv without a shell; pass stdout through on success."""
     if not argv:
@@ -538,7 +568,7 @@ def main(argv: list[str] | None = None) -> int:
         except (ValueError, UnicodeDecodeError) as exc:
             raise StatuslineError("status-line input is not valid JSON") from exc
         five_hour, seven_day = parse_statusline_document(document, now)
-        if seven_day is not None:
+        if seven_day is not None and windows_are_current(document, now):
             profile_path = statusline_cache_path()
             try:
                 save_cache(profile_path, now, five_hour, seven_day)

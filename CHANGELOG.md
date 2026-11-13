@@ -23,6 +23,15 @@
   and a 45-column phone pane reads `Fable 5.2 143K 5h 40% 7d 27% Fable 45%`. The
   percentages and context depth are never shed, `max` effort always stays,
   and with no usable `COLUMNS` the full line is printed as before.
+- `claude-statusline` is now safe to run on a timer. Claude Code does not
+  re-run the command when the terminal is resized, so the line stays laid
+  out for the old width until the next event; setting `refreshInterval` in
+  the `statusLine` setting fixes that. A timer run in an idle session
+  carries that session's last, possibly old, windows, so the collector now
+  writes the cache only while the session's transcript has changed within
+  the last 60 seconds. An idle session still renders, but can no longer
+  overwrite a busier session's newer reading or stamp an old one as fresh.
+  A payload with no usable `transcript_path` is written as before.
 - The Herdr sidebar quota display is now two compact rows instead of one
   token. `model_quota_core` carries only the live Codex and Claude weekly
   windows; `model_quota_other` carries only the live tighter Claude
