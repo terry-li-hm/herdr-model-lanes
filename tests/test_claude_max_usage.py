@@ -12,6 +12,19 @@ from urllib.error import URLError
 
 import claude_max_usage as helper
 
+
+def setUpModule() -> None:
+    """Isolate the suite from the launching session's Claude profile.
+
+    The per-test environments are applied without ``clear=True``, so a
+    session started under a non-default ``CLAUDE_CONFIG_DIR`` would otherwise
+    leak that profile into every cache and credential path.
+    """
+    patcher = mock.patch.dict(os.environ)
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
+    os.environ.pop("CLAUDE_CONFIG_DIR", None)
+
 NOW_MS = 1_700_000_000_000
 SYNTHETIC_TOKEN = "synthetic-oauth-token-for-tests"
 
