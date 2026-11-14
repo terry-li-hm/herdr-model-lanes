@@ -4,6 +4,14 @@
 
 ### Changed
 
+- The model-scoped weekly segment of the `claude-statusline` line now carries
+  a signed pace mark: the scoped utilization minus the share of the week that
+  had already passed when the reading was taken, in whole percentage points
+  (`Fable 91% +10 1d6h` means the limit is being spent ten points faster than
+  the week is passing; `+0` is on pace). The mark is never shed with the
+  width, a pace above +10 colours the segment at least yellow, and it is
+  dropped when the reading is more than two hours old or its reset does not
+  bound the reading's own week.
 - The `claude-statusline` line now shows what a session is costing as well
   as what the plan has left. It reads `Fable 5.2 xhigh | ctx 143K | 5h 40%
   1h58m | 7d 27% | Fable 45% 2d1h | a6`: the reasoning effort follows the

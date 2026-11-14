@@ -528,7 +528,9 @@ class ScopedLimitRenderTests(unittest.TestCase):
                     {"utilization": 38, "resets_at": now + 340000},
                     now,
                 )
-        self.assertEqual(line, "Fable 5.1 | 5h 12% 1h40m | 7d 38% | Fable 76% 3d22h")
+        self.assertEqual(
+            line, "Fable 5.1 | 5h 12% 1h40m | 7d 38% | Fable 76% +32 3d22h"
+        )
 
     def test_stale_or_reset_scoped_cache_is_ignored(self) -> None:
         now = 1788950000
@@ -538,6 +540,140 @@ class ScopedLimitRenderTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"HERDR_PLUGIN_STATE_DIR": tmp}):
                 line = collector.render_status_line({"model": "Fable"}, None, None, now)
         self.assertEqual(line, "Fable | 5h n/a | 7d n/a")
+
+
+class PaceMarkTests(unittest.TestCase):
+    """The signed pace mark on the model-scoped weekly segment."""
+
+    NOW = 1788950000
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.state = Path(self._tmp.name)
+        patcher = mock.patch.dict(
+            os.environ, {"HERDR_PLUGIN_STATE_DIR": str(self.state)}
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _write_scoped(
+        self, utilization: float, remaining: int, fetched_age: int = 60
+    ) -> None:
+        """Cache a scoped limit read ``remaining`` seconds before its reset
+        and ``fetched_age`` seconds before NOW."""
+        fetched_at = self.NOW - fetched_age
+        (self.state / collector.SCOPED_CACHE_FILENAME).write_text(
+            json.dumps(
+                {
+                    "scope": "Fable",
+                    "utilization": utilization,
+                    "resets_at": fetched_at + remaining,
+                    "fetched_at": fetched_at,
+                }
+            )
+        )
+
+    def _write_raw_scoped(self, cache: dict) -> None:
+        (self.state / collector.SCOPED_CACHE_FILENAME).write_text(json.dumps(cache))
+
+    def _render(self, **kwargs: object) -> str:
+        kwargs.setdefault("color", False)
+        return collector.render_status_line(
+            {"model": "Fable"}, None, None, self.NOW, **kwargs
+        )
+
+    def test_ahead_of_pace_renders_a_positive_token(self) -> None:
+        # 112440 s = 31h14m left in the week, so 81.42% of it had passed:
+        # 91% utilization is ten points ahead of the week.
+        self._write_scoped(91.0, 112440)
+        self.assertEqual(self._render(), "Fable | 5h n/a | 7d n/a | Fable 91% +10 1d7h")
+
+    def test_behind_pace_renders_a_negative_token(self) -> None:
+        self._write_scoped(20.0, 112440)
+        self.assertEqual(self._render(), "Fable | 5h n/a | 7d n/a | Fable 20% -61 1d7h")
+
+    def test_on_pace_renders_plus_zero(self) -> None:
+        # Half the week gone, half the limit used.
+        self._write_scoped(50.0, collector.WEEK_SECS // 2)
+        self.assertEqual(self._render(), "Fable | 5h n/a | 7d n/a | Fable 50% +0 3d11h")
+
+    def test_rounding_is_half_up(self) -> None:
+        # Half the week gone: 60.5% sits ten and a half points ahead and
+        # 39.5% ten and a half behind; floor(value + 0.5) gives +11 and -10.
+        for utilization, mark in ((60.5, "+11"), (39.5, "-10")):
+            with self.subTest(utilization=utilization):
+                self._write_scoped(utilization, collector.WEEK_SECS // 2)
+                self.assertIn(f"Fable {utilization}% {mark}", self._render())
+
+    def test_missing_reset_time_shows_no_scoped_segment_or_pace(self) -> None:
+        caches = [
+            {"scope": "Fable", "utilization": 91.0, "fetched_at": self.NOW - 60},
+            {"scope": "Fable", "utilization": 91.0, "resets_at": self.NOW + 112440},
+            {
+                "scope": "Fable",
+                "utilization": 91.0,
+                "resets_at": self.NOW + 112440,
+                "fetched_at": float("nan"),
+            },
+        ]
+        for cache in caches:
+            with self.subTest(cache=cache):
+                self._write_raw_scoped(cache)
+                self.assertEqual(self._render(), "Fable | 5h n/a | 7d n/a")
+
+    def test_stale_reading_keeps_the_segment_but_sheds_the_pace(self) -> None:
+        # Exactly two hours old still counts; anything older does not.
+        self._write_scoped(91.0, 112440, fetched_age=collector.PACE_MAX_AGE_SECS)
+        self.assertEqual(self._render(), "Fable | 5h n/a | 7d n/a | Fable 91% +10 1d5h")
+        self._write_scoped(91.0, 112440, fetched_age=collector.PACE_MAX_AGE_SECS + 60)
+        self.assertEqual(self._render(), "Fable | 5h n/a | 7d n/a | Fable 91% 1d5h")
+
+    def test_reset_not_bounding_the_readings_week_sheds_the_pace(self) -> None:
+        # A full week remaining is the largest share a reset can bound.
+        self._write_scoped(91.0, collector.WEEK_SECS)
+        self.assertEqual(
+            self._render(), "Fable | 5h n/a | 7d n/a | Fable 91% +91 6d23h"
+        )
+        self._write_scoped(91.0, collector.WEEK_SECS + 1)
+        self.assertEqual(self._render(), "Fable | 5h n/a | 7d n/a | Fable 91% 6d23h")
+
+    def test_day_old_reading_shows_neither_segment_nor_pace(self) -> None:
+        self._write_scoped(
+            91.0, 112440, fetched_age=collector.SCOPED_CACHE_MAX_AGE_SECS + 60
+        )
+        self.assertEqual(self._render(), "Fable | 5h n/a | 7d n/a")
+
+    def test_pace_above_ten_colours_the_segment_at_least_warn(self) -> None:
+        warn, reset = collector.ANSI_WARN, collector.ANSI_RESET
+        # Utilization 20% is calm; the pace alone lifts the segment to warn.
+        self._write_scoped(20.0, 600000)
+        self.assertEqual(
+            self._render(color=True),
+            f"Fable | 5h n/a | 7d n/a | {warn}Fable 20% +19 6d22h{reset}",
+        )
+
+    def test_pace_of_ten_does_not_colour_a_calm_segment(self) -> None:
+        self._write_scoped(65.0, 272160)
+        line = self._render(color=True)
+        self.assertEqual(line, "Fable | 5h n/a | 7d n/a | Fable 65% +10 3d3h")
+        self.assertNotIn("\033", line)
+
+    def test_pace_token_survives_a_45_column_terminal(self) -> None:
+        self._write_scoped(91.0, 112440)
+        line = collector.render_status_line(
+            {
+                "model": {"display_name": "Fable 5.2"},
+                "context_window": {"total_input_tokens": 143_200},
+            },
+            {"utilization": 40, "resets_at": self.NOW + 7080},
+            {"utilization": 27, "resets_at": self.NOW + 176400},
+            self.NOW,
+            color=False,
+            columns=45,
+        )
+        self.assertEqual(line, "143K 5h 40% 7d 27% Fable 91% +10")
+        self.assertLessEqual(len(line), 45 - collector.STATUS_LINE_MARGIN_COLUMNS)
 
 
 class RenderSegmentsTests(unittest.TestCase):
@@ -588,7 +724,7 @@ class RenderSegmentsTests(unittest.TestCase):
             line = self._render(self._document())
         self.assertEqual(
             line,
-            "Fable 5.2 xhigh | ctx 143K | 5h 40% 1h58m | 7d 27% | Fable 45% 2d1h | a6",
+            "Fable 5.2 xhigh | ctx 143K | 5h 40% 1h58m | 7d 27% | Fable 45% -26 2d1h | a6",
         )
         self.assertTrue(line.isascii())
 
@@ -596,7 +732,8 @@ class RenderSegmentsTests(unittest.TestCase):
         self._write_scoped(self.state, self.NOW + 90000)
         line = self._render(self._document())
         self.assertEqual(
-            line, "Fable 5.2 xhigh | ctx 143K | 5h 40% 1h58m | 7d 27% 2d1h | Fable 45% 1d1h"
+            line,
+            "Fable 5.2 xhigh | ctx 143K | 5h 40% 1h58m | 7d 27% 2d1h | Fable 45% -40 1d1h",
         )
 
     def test_absent_or_invalid_context_and_effort_are_omitted(self) -> None:
@@ -665,16 +802,16 @@ class RenderSegmentsTests(unittest.TestCase):
     def test_detail_is_shed_in_order_as_the_terminal_narrows(self) -> None:
         # Usable width is columns minus the four-column margin.
         cases = {
-            None: "Fable 5.2 xhigh | ctx 143K | 5h 40% 1h58m | 7d 27% | Fable 45% 2d1h | a6",
-            76: "Fable 5.2 xhigh | ctx 143K | 5h 40% 1h58m | 7d 27% | Fable 45% 2d1h | a6",
-            75: "Fable 5.2 xhigh | ctx 143K | 5h 40% 1h58m | 7d 27% | Fable 45% 2d1h",
-            70: "Fable 5.2 xhigh | ctx 143K | 5h 40% 1h58m | 7d 27% | Fable 45%",
-            65: "Fable 5.2 xhigh | 143K | 5h 40% 1h58m | 7d 27% | Fable 45%",
-            61: "Fable 5.2 xhigh | 143K | 5h 40% | 7d 27% | Fable 45%",
-            55: "Fable 5.2 xhigh 143K 5h 40% 7d 27% Fable 45%",
-            47: "Fable 5.2 143K 5h 40% 7d 27% Fable 45%",
-            41: "143K 5h 40% 7d 27% Fable 45%",
-            12: "143K 5h 40% 7d 27% Fable 45%",
+            None: "Fable 5.2 xhigh | ctx 143K | 5h 40% 1h58m | 7d 27% | Fable 45% -26 2d1h | a6",
+            76: "Fable 5.2 xhigh | ctx 143K | 5h 40% 1h58m | 7d 27% | Fable 45% -26 2d1h",
+            75: "Fable 5.2 xhigh | ctx 143K | 5h 40% 1h58m | 7d 27% | Fable 45% -26 2d1h",
+            70: "Fable 5.2 xhigh | ctx 143K | 5h 40% 1h58m | 7d 27% | Fable 45% -26",
+            65: "Fable 5.2 xhigh | 143K | 5h 40% | 7d 27% | Fable 45% -26",
+            61: "Fable 5.2 xhigh | 143K | 5h 40% | 7d 27% | Fable 45% -26",
+            55: "Fable 5.2 xhigh 143K 5h 40% 7d 27% Fable 45% -26",
+            47: "Fable 5.2 143K 5h 40% 7d 27% Fable 45% -26",
+            41: "143K 5h 40% 7d 27% Fable 45% -26",
+            12: "143K 5h 40% 7d 27% Fable 45% -26",
         }
         for columns, expected in cases.items():
             with self.subTest(columns=columns):
@@ -690,7 +827,8 @@ class RenderSegmentsTests(unittest.TestCase):
         plain = self._render_at(76, document=document)
         coloured = self._render_at(76, document=document, color=True)
         self.assertEqual(
-            plain, "Fable 5.2 xhigh | ctx 212K | 5h 40% 1h58m | 7d 27% | Fable 45% 2d1h | a6"
+            plain,
+            "Fable 5.2 xhigh | ctx 212K | 5h 40% 1h58m | 7d 27% | Fable 45% -26 2d1h",
         )
         self.assertEqual(
             coloured.replace(collector.ANSI_HIGH, "").replace(collector.ANSI_RESET, ""), plain
@@ -698,12 +836,12 @@ class RenderSegmentsTests(unittest.TestCase):
 
     def test_costly_effort_survives_the_narrowest_terminal(self) -> None:
         line = self._render_at(20, document=self._document(effort={"level": "max"}))
-        self.assertEqual(line, "max 143K 5h 40% 7d 27% Fable 45%")
+        self.assertEqual(line, "max 143K 5h 40% 7d 27% Fable 45% -26")
 
     def test_columns_come_from_the_environment_and_bad_values_are_ignored(self) -> None:
         full = self._render_at(None)
         for raw, expected in {
-            "61": "Fable 5.2 xhigh | 143K | 5h 40% | 7d 27% | Fable 45%",
+            "61": "Fable 5.2 xhigh | 143K | 5h 40% | 7d 27% | Fable 45% -26",
             "": full,
             "0": full,
             "-5": full,

@@ -26,11 +26,21 @@ fresh cache holds one, and a short label for a non-default
 least important ones sit on the right where a narrow terminal truncates
 first. Readings near a limit are coloured unless ``NO_COLOR`` is set.
 
+The model-scoped weekly segment carries a signed pace mark right after its
+percentage: the scoped utilization minus the share of the week that had
+passed when the reading was taken, in whole percentage points (``Fable 91%
++10`` means the scoped limit is being spent ten points faster than the week
+is passing; ``+0`` reads as on pace). The mark is shown only when the
+cached reading is no more than two hours old and its reset bounds the
+reading's own week, and a pace above +10 colours the segment at least
+yellow.
+
 Claude Code exports the terminal width as ``COLUMNS``. When the full line
 would not fit, detail is shed in a fixed order until it does: the account
 label, the weekly countdowns, the ``ctx`` label, the 5h countdown, the bar
-separators, the effort and finally the model name. The percentages and the
-context depth are never shed, so a phone-width pane still shows them.
+separators, the effort and finally the model name. The percentages, the
+pace mark and the context depth are never shed, so a phone-width pane
+still shows them.
 
 When arguments follow ``--``, the original stdin bytes are forwarded to that
 exact argv without a shell and with a short timeout; on success the
@@ -55,6 +65,13 @@ PLUGIN_ID_PATH = "herdr/plugins/terry.herdr-model-lanes"
 CACHE_FILENAME = "claude-statusline.json"
 SCOPED_CACHE_FILENAME = "claude-scoped-limit.json"
 SCOPED_CACHE_MAX_AGE_SECS = 24 * 3600
+# A pace mark is computed only from a reading at most this old; the scoped
+# segment itself stays visible for the full 24 hours above.
+PACE_MAX_AGE_SECS = 2 * 3600
+WEEK_SECS = 7 * 24 * 3600
+# A pace mark above this many points lifts the scoped segment's colour to at
+# least warn even when the utilization itself is calm.
+PACE_WARN_ABOVE = 10
 MAX_INPUT_BYTES = 1 << 20
 MAX_CACHE_BYTES = 64 * 1024
 DOWNSTREAM_TIMEOUT_SECS = 1
@@ -265,7 +282,8 @@ def load_scoped_limit(now: int, state_dir: str | os.PathLike[str] | None = None)
     """Return the cached model-scoped weekly limit written by claude_max_usage.
 
     The cache is used only when ``fetched_at`` is within 24 hours and the
-    window has not reset. Returns ``{"scope", "utilization", "resets_at"}``.
+    window has not reset. Returns ``{"scope", "utilization", "resets_at",
+    "fetched_at"}``.
     """
     path = statusline_cache_path(state_dir).with_name(SCOPED_CACHE_FILENAME)
     try:
@@ -288,7 +306,12 @@ def load_scoped_limit(now: int, state_dir: str | os.PathLike[str] | None = None)
         return None
     if not _is_finite_number(resets_at) or int(resets_at) <= now:
         return None
-    return {"scope": scope, "utilization": utilization, "resets_at": int(resets_at)}
+    return {
+        "scope": scope,
+        "utilization": utilization,
+        "resets_at": int(resets_at),
+        "fetched_at": fetched_at,
+    }
 
 def _countdown(resets_at: int, now: int) -> str:
     seconds = max(resets_at - now, 0)
@@ -318,18 +341,60 @@ def _level(value: float, warn_at: float, high_at: float) -> str | None:
     return None
 
 
+def _round_half_up(value: float) -> int:
+    """Round to the nearest integer with ``math.floor(value + 0.5)``."""
+    return math.floor(value + 0.5)
+
+
+def _scoped_pace(scoped: dict, now: int) -> int | None:
+    """Signed weekly pace in whole percentage points, or None when unusable.
+
+    Pace is the scoped utilization minus the share of the week that had
+    passed when the reading was taken, so ``+10`` reads as "ten points
+    ahead of the week". Rounded with ``_round_half_up``, matching the
+    sibling pace implementation. None when ``fetched_at`` is unusable or
+    older than ``PACE_MAX_AGE_SECS``, or when ``resets_at - fetched_at``
+    does not bound the reading's own week.
+    """
+    fetched_at = scoped.get("fetched_at")
+    if not _is_finite_number(fetched_at):
+        return None
+    if now - fetched_at > PACE_MAX_AGE_SECS:
+        return None
+    remaining = scoped["resets_at"] - fetched_at
+    if not 0 < remaining <= WEEK_SECS:
+        return None
+    elapsed_share = 1 - remaining / WEEK_SECS
+    return _round_half_up(scoped["utilization"] - 100 * elapsed_share)
+
+
 def _window_segment(
-    label: str, window: dict | None, now: int, *, countdown: bool = True
+    label: str,
+    window: dict | None,
+    now: int,
+    *,
+    countdown: bool = True,
+    pace: int | None = None,
 ) -> tuple[str, str | None]:
-    """One quota window as (text, colour level)."""
+    """One quota window as (text, colour level).
+
+    ``pace``, when not None, is the signed weekly pace mark printed right
+    after the percentage and never shed; a pace above ``PACE_WARN_ABOVE``
+    lifts the colour level to at least ``warn``.
+    """
     if window is None:
         return f"{label} n/a", None
     utilization = window["utilization"]
     percent = int(utilization) if float(utilization).is_integer() else utilization
     text = f"{label} {percent}%"
+    if pace is not None:
+        text += f" {pace:+d}"
     if countdown:
         text += f" {_countdown(window['resets_at'], now)}"
-    return text, _level(utilization, QUOTA_WARN_PERCENT, QUOTA_HIGH_PERCENT)
+    level = _level(utilization, QUOTA_WARN_PERCENT, QUOTA_HIGH_PERCENT)
+    if pace is not None and pace > PACE_WARN_ABOVE and level is None:
+        level = "warn"
+    return text, level
 
 
 def _model_and_effort(document: object) -> tuple[str, str | None]:
@@ -426,13 +491,18 @@ def render_status_line(
     set to a non-empty value. ``columns`` defaults to the ``COLUMNS``
     environment variable; when the line is wider than the terminal, detail
     is shed in ``WIDTH_REDUCTIONS`` order until it fits or nothing is left
-    to shed. With no known width the full line is printed.
+    to shed. With no known width the full line is printed. The
+    model-scoped weekly segment carries a signed pace mark right after its
+    percentage, which is never shed; it is omitted when the cached reading
+    is older than ``PACE_MAX_AGE_SECS`` or its reset does not bound the
+    reading's week.
     """
     if color is None:
         color = not os.environ.get("NO_COLOR")
     if columns is None:
         columns = _terminal_columns()
     scoped = load_scoped_limit(now)
+    pace = None if scoped is None else _scoped_pace(scoped, now)
     model, effort = _model_and_effort(document)
     tokens = _context_tokens(document)
     account = _account_label()
@@ -473,7 +543,9 @@ def render_status_line(
         )
         if scoped is not None:
             segments.append(
-                _window_segment(scoped["scope"], scoped, now, countdown=weekly_countdown)
+                _window_segment(
+                    scoped["scope"], scoped, now, countdown=weekly_countdown, pace=pace
+                )
             )
         if account is not None and "account" not in shed:
             segments.append((account, None))
