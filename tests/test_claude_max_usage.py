@@ -25,6 +25,7 @@ def setUpModule() -> None:
     unittest.addModuleCleanup(patcher.stop)
     os.environ.pop("CLAUDE_CONFIG_DIR", None)
 
+
 NOW_MS = 1_700_000_000_000
 SYNTHETIC_TOKEN = "synthetic-oauth-token-for-tests"
 
@@ -712,28 +713,63 @@ class ScopedLimitTests(unittest.TestCase):
     def test_extracts_model_scoped_weekly_limit(self) -> None:
         document = {
             "limits": [
-                {"kind": "session", "percent": 13, "resets_at": "2026-09-09T13:20:00+00:00", "scope": None},
-                {"kind": "weekly_all", "percent": 39, "resets_at": "2026-09-13T09:00:00+00:00", "scope": None},
-                {"kind": "weekly_scoped", "percent": 76, "severity": "warning",
-                 "resets_at": "2026-09-13T09:00:00+00:00",
-                 "scope": {"model": {"id": None, "display_name": "Fable"}, "surface": None}},
+                {
+                    "kind": "session",
+                    "percent": 13,
+                    "resets_at": "2026-09-09T13:20:00+00:00",
+                    "scope": None,
+                },
+                {
+                    "kind": "weekly_all",
+                    "percent": 39,
+                    "resets_at": "2026-09-13T09:00:00+00:00",
+                    "scope": None,
+                },
+                {
+                    "kind": "weekly_scoped",
+                    "percent": 76,
+                    "severity": "warning",
+                    "resets_at": "2026-09-13T09:00:00+00:00",
+                    "scope": {
+                        "model": {"id": None, "display_name": "Fable"},
+                        "surface": None,
+                    },
+                },
             ]
         }
         scoped = helper.extract_scoped_limit(document)
-        self.assertEqual(scoped, {"scope": "Fable", "utilization": 76.0, "resets_at": 1789290000})
+        self.assertEqual(
+            scoped, {"scope": "Fable", "utilization": 76.0, "resets_at": 1789290000}
+        )
 
     def test_no_scoped_entry_returns_none(self) -> None:
-        self.assertIsNone(helper.extract_scoped_limit({"limits": [{"kind": "weekly_all", "percent": 1}]}))
+        self.assertIsNone(
+            helper.extract_scoped_limit(
+                {"limits": [{"kind": "weekly_all", "percent": 1}]}
+            )
+        )
         self.assertIsNone(helper.extract_scoped_limit({"limits": None}))
         self.assertIsNone(helper.extract_scoped_limit("nope"))
 
     def test_save_scoped_limit_round_trips_with_mode_0600(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "claude-scoped-limit.json")
-            helper.save_scoped_limit({"scope": "Fable", "utilization": 76.0, "resets_at": 1789290000}, 1788950000, path)
+            helper.save_scoped_limit(
+                {"scope": "Fable", "utilization": 76.0, "resets_at": 1789290000},
+                1788950000,
+                path,
+            )
             self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
             with open(path) as handle:
-                self.assertEqual(json.load(handle), {"scope": "Fable", "utilization": 76.0, "resets_at": 1789290000, "fetched_at": 1788950000})
+                self.assertEqual(
+                    json.load(handle),
+                    {
+                        "scope": "Fable",
+                        "utilization": 76.0,
+                        "resets_at": 1789290000,
+                        "fetched_at": 1788950000,
+                    },
+                )
             self.assertEqual(helper._scoped_cache_age(1788950900, path), 900)
             helper.save_scoped_limit(None, 1788950000, path)
             self.assertFalse(os.path.exists(path))
@@ -774,17 +810,23 @@ class ProfileScopedStatuslineTests(unittest.TestCase):
             self.assertEqual(
                 helper.scoped_cache_path(),
                 os.path.join(
-                    "/state/a", "profiles", ".claude-account5", "claude-scoped-limit.json"
+                    "/state/a",
+                    "profiles",
+                    ".claude-account5",
+                    "claude-scoped-limit.json",
                 ),
             )
 
     def test_default_config_dir_keeps_root_paths(self) -> None:
         for config_dir in (None, "~/.claude"):
-            with self.subTest(claude_config_dir=config_dir), mock.patch.dict(
-                os.environ,
-                self._env(
-                    HERDR_PLUGIN_STATE_DIR="/state/a",
-                    CLAUDE_CONFIG_DIR=config_dir,
+            with (
+                self.subTest(claude_config_dir=config_dir),
+                mock.patch.dict(
+                    os.environ,
+                    self._env(
+                        HERDR_PLUGIN_STATE_DIR="/state/a",
+                        CLAUDE_CONFIG_DIR=config_dir,
+                    ),
                 ),
             ):
                 self.assertEqual(
@@ -794,11 +836,14 @@ class ProfileScopedStatuslineTests(unittest.TestCase):
 
     def test_already_scoped_state_dir_does_not_double_nest(self) -> None:
         for leaf in ("profiles/.claude-account5", "profile-123"):
-            with self.subTest(leaf=leaf), mock.patch.dict(
-                os.environ,
-                self._env(
-                    HERDR_PLUGIN_STATE_DIR=os.path.join("/state/a", leaf),
-                    CLAUDE_CONFIG_DIR="~/.claude-account5",
+            with (
+                self.subTest(leaf=leaf),
+                mock.patch.dict(
+                    os.environ,
+                    self._env(
+                        HERDR_PLUGIN_STATE_DIR=os.path.join("/state/a", leaf),
+                        CLAUDE_CONFIG_DIR="~/.claude-account5",
+                    ),
                 ),
             ):
                 self.assertEqual(
@@ -831,21 +876,24 @@ class ProfileScopedStatuslineTests(unittest.TestCase):
                     },
                     handle,
                 )
-            with mock.patch.dict(
-                os.environ,
-                self._env(
-                    HERDR_PLUGIN_STATE_DIR=tmp,
-                    CLAUDE_CONFIG_DIR="~/.claude-account5",
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    self._env(
+                        HERDR_PLUGIN_STATE_DIR=tmp,
+                        CLAUDE_CONFIG_DIR="~/.claude-account5",
+                    ),
                 ),
-            ), mock.patch(
-                "claude_max_usage.read_oauth_token",
-                side_effect=AssertionError("credential access must not happen"),
-            ), mock.patch(
-                "claude_max_usage.fetch_usage",
-                side_effect=AssertionError("network access must not happen"),
-            ), mock.patch(
-                "sys.stdout", new_callable=lambda: io.StringIO()
-            ) as out:
+                mock.patch(
+                    "claude_max_usage.read_oauth_token",
+                    side_effect=AssertionError("credential access must not happen"),
+                ),
+                mock.patch(
+                    "claude_max_usage.fetch_usage",
+                    side_effect=AssertionError("network access must not happen"),
+                ),
+                mock.patch("sys.stdout", new_callable=lambda: io.StringIO()) as out,
+            ):
                 rc = helper.main([])
 
         self.assertEqual(rc, 0)
@@ -865,22 +913,26 @@ class ProfileScopedStatuslineTests(unittest.TestCase):
                     },
                     handle,
                 )
-            with mock.patch.dict(
-                os.environ,
-                self._env(
-                    HERDR_PLUGIN_STATE_DIR=tmp,
-                    CLAUDE_CONFIG_DIR="~/.claude-account5",
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    self._env(
+                        HERDR_PLUGIN_STATE_DIR=tmp,
+                        CLAUDE_CONFIG_DIR="~/.claude-account5",
+                    ),
                 ),
-            ), mock.patch(
-                "claude_max_usage.read_oauth_token", return_value=SYNTHETIC_TOKEN
-            ), mock.patch(
-                "claude_max_usage.fetch_usage"
-            ) as fetch, mock.patch(
-                "sys.stdout", new_callable=lambda: io.StringIO()
-            ) as out:
+                mock.patch(
+                    "claude_max_usage.read_oauth_token", return_value=SYNTHETIC_TOKEN
+                ),
+                mock.patch("claude_max_usage.fetch_usage") as fetch,
+                mock.patch("sys.stdout", new_callable=lambda: io.StringIO()) as out,
+            ):
                 fetch.return_value = {
                     "five_hour": None,
-                    "seven_day": {"utilization": 9, "resets_at": "2026-08-23T08:59:59Z"},
+                    "seven_day": {
+                        "utilization": 9,
+                        "resets_at": "2026-08-23T08:59:59Z",
+                    },
                     "seven_day_sonnet": None,
                 }
                 rc = helper.main([])

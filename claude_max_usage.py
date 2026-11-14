@@ -196,6 +196,7 @@ def _iso_to_epoch(value: object) -> int | None:
         return None
     try:
         from datetime import datetime
+
         return int(datetime.fromisoformat(value).timestamp())
     except ValueError:
         return None
@@ -227,7 +228,11 @@ def extract_scoped_limit(document: object) -> dict | None:
                 name = model["display_name"]
         resets_at = _iso_to_epoch(entry.get("resets_at"))
         if name and resets_at is not None:
-            return {"scope": name, "utilization": float(percent), "resets_at": resets_at}
+            return {
+                "scope": name,
+                "utilization": float(percent),
+                "resets_at": resets_at,
+            }
     return None
 
 
@@ -235,7 +240,9 @@ def scoped_cache_path() -> str:
     return os.path.join(os.path.dirname(statusline_cache_path()), SCOPED_CACHE_FILENAME)
 
 
-def save_scoped_limit(scoped: dict | None, fetched_at: int, path: str | None = None) -> None:
+def save_scoped_limit(
+    scoped: dict | None, fetched_at: int, path: str | None = None
+) -> None:
     """Atomically persist the scoped limit with mode 0600; None clears it."""
     if path is None:
         path = scoped_cache_path()
@@ -360,10 +367,9 @@ def _already_profile_scoped(base_dir: str) -> bool:
     get a second ``profiles/`` level appended.
     """
     norm_base = os.path.normpath(base_dir)
-    return (
-        os.path.basename(os.path.dirname(norm_base)) == "profiles"
-        or os.path.basename(norm_base).startswith("profile-")
-    )
+    return os.path.basename(
+        os.path.dirname(norm_base)
+    ) == "profiles" or os.path.basename(norm_base).startswith("profile-")
 
 
 def statusline_cache_path(config_dir: str | os.PathLike[str] | None = None) -> str:

@@ -439,12 +439,16 @@ class CollectorMainTests(unittest.TestCase):
         payload = _payload(
             five_hour=_live_window(45),
             seven_day=_live_window(30),
-            transcript_path=self._transcript(age_secs=collector.ACTIVE_TRANSCRIPT_SECS - 20),
+            transcript_path=self._transcript(
+                age_secs=collector.ACTIVE_TRANSCRIPT_SECS - 20
+            ),
         )
         rc, _, _ = self._run(json.dumps(payload).encode())
 
         self.assertEqual(rc, 0)
-        self.assertEqual(json.loads(self.cache.read_text())["seven_day"]["utilization"], 30)
+        self.assertEqual(
+            json.loads(self.cache.read_text())["seven_day"]["utilization"], 30
+        )
 
     def test_unprompted_session_is_current_only_for_its_first_minute(self) -> None:
         now = int(time.time())
@@ -459,9 +463,14 @@ class CollectorMainTests(unittest.TestCase):
         }
         for running_ms, expected in cases.items():
             with self.subTest(running_ms=running_ms):
-                document = {"transcript_path": missing, "cost": {"total_duration_ms": running_ms}}
+                document = {
+                    "transcript_path": missing,
+                    "cost": {"total_duration_ms": running_ms},
+                }
                 self.assertIs(collector.windows_are_current(document, now), expected)
-        self.assertTrue(collector.windows_are_current({"transcript_path": missing}, now))
+        self.assertTrue(
+            collector.windows_are_current({"transcript_path": missing}, now)
+        )
 
         idle = _payload(
             five_hour=_live_window(10),
@@ -519,8 +528,16 @@ class ScopedLimitRenderTests(unittest.TestCase):
     def test_renders_scoped_limit_from_cache(self) -> None:
         now = 1788950000
         with tempfile.TemporaryDirectory() as tmp:
-            Path(tmp, "claude-scoped-limit.json").write_text(json.dumps(
-                {"scope": "Fable", "utilization": 76.0, "resets_at": 1789290000, "fetched_at": now - 60}))
+            Path(tmp, "claude-scoped-limit.json").write_text(
+                json.dumps(
+                    {
+                        "scope": "Fable",
+                        "utilization": 76.0,
+                        "resets_at": 1789290000,
+                        "fetched_at": now - 60,
+                    }
+                )
+            )
             with mock.patch.dict(os.environ, {"HERDR_PLUGIN_STATE_DIR": tmp}):
                 line = collector.render_status_line(
                     {"model": {"display_name": "Fable 5.1"}},
@@ -535,8 +552,16 @@ class ScopedLimitRenderTests(unittest.TestCase):
     def test_stale_or_reset_scoped_cache_is_ignored(self) -> None:
         now = 1788950000
         with tempfile.TemporaryDirectory() as tmp:
-            Path(tmp, "claude-scoped-limit.json").write_text(json.dumps(
-                {"scope": "Fable", "utilization": 76.0, "resets_at": now - 1, "fetched_at": now - 60}))
+            Path(tmp, "claude-scoped-limit.json").write_text(
+                json.dumps(
+                    {
+                        "scope": "Fable",
+                        "utilization": 76.0,
+                        "resets_at": now - 1,
+                        "fetched_at": now - 60,
+                    }
+                )
+            )
             with mock.patch.dict(os.environ, {"HERDR_PLUGIN_STATE_DIR": tmp}):
                 line = collector.render_status_line({"model": "Fable"}, None, None, now)
         self.assertEqual(line, "Fable | 5h n/a | 7d n/a")
@@ -685,7 +710,9 @@ class RenderSegmentsTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.state = Path(self._tmp.name)
-        patcher = mock.patch.dict(os.environ, {"HERDR_PLUGIN_STATE_DIR": str(self.state)})
+        patcher = mock.patch.dict(
+            os.environ, {"HERDR_PLUGIN_STATE_DIR": str(self.state)}
+        )
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -693,16 +720,25 @@ class RenderSegmentsTests(unittest.TestCase):
         document = {
             "model": {"display_name": "Fable 5.2"},
             "effort": {"level": "xhigh"},
-            "context_window": {"total_input_tokens": 143_200, "total_output_tokens": 900},
+            "context_window": {
+                "total_input_tokens": 143_200,
+                "total_output_tokens": 900,
+            },
         }
         document.update(extra)
         return document
 
     def _render(self, document: object, **kwargs: object) -> str:
-        five_hour = kwargs.pop("five_hour", {"utilization": 40, "resets_at": self.NOW + 7080})
-        seven_day = kwargs.pop("seven_day", {"utilization": 27, "resets_at": self.NOW + 176400})
+        five_hour = kwargs.pop(
+            "five_hour", {"utilization": 40, "resets_at": self.NOW + 7080}
+        )
+        seven_day = kwargs.pop(
+            "seven_day", {"utilization": 27, "resets_at": self.NOW + 176400}
+        )
         kwargs.setdefault("color", False)
-        return collector.render_status_line(document, five_hour, seven_day, self.NOW, **kwargs)
+        return collector.render_status_line(
+            document, five_hour, seven_day, self.NOW, **kwargs
+        )
 
     def _write_scoped(self, directory: Path, resets_at: int) -> None:
         directory.mkdir(parents=True, exist_ok=True)
@@ -719,7 +755,9 @@ class RenderSegmentsTests(unittest.TestCase):
 
     def test_full_line_for_a_numbered_account_profile(self) -> None:
         config_dir = os.path.join(os.path.expanduser("~"), ".claude-account6")
-        self._write_scoped(self.state / "profiles" / ".claude-account6", self.NOW + 176400)
+        self._write_scoped(
+            self.state / "profiles" / ".claude-account6", self.NOW + 176400
+        )
         with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": config_dir}):
             line = self._render(self._document())
         self.assertEqual(
@@ -728,7 +766,9 @@ class RenderSegmentsTests(unittest.TestCase):
         )
         self.assertTrue(line.isascii())
 
-    def test_seven_day_keeps_countdown_when_scoped_limit_resets_separately(self) -> None:
+    def test_seven_day_keeps_countdown_when_scoped_limit_resets_separately(
+        self,
+    ) -> None:
         self._write_scoped(self.state, self.NOW + 90000)
         line = self._render(self._document())
         self.assertEqual(
@@ -742,17 +782,28 @@ class RenderSegmentsTests(unittest.TestCase):
             {"model": {"display_name": "Fable 5.2"}},
             self._document(effort=None, context_window=None),
             self._document(effort={"level": "x high; rm"}, context_window={}),
-            self._document(effort={"level": 3}, context_window={"total_input_tokens": 0}),
-            self._document(effort="max", context_window={"total_input_tokens": float("nan")}),
+            self._document(
+                effort={"level": 3}, context_window={"total_input_tokens": 0}
+            ),
+            self._document(
+                effort="max", context_window={"total_input_tokens": float("nan")}
+            ),
             self._document(effort={}, context_window={"total_input_tokens": "143200"}),
-            self._document(effort={"level": ""}, context_window={"total_input_tokens": True}),
+            self._document(
+                effort={"level": ""}, context_window={"total_input_tokens": True}
+            ),
         ]
         for document in documents:
             with self.subTest(document=document):
                 self.assertEqual(self._render(document), expected)
 
     def test_context_depth_formats_thousands_and_millions(self) -> None:
-        cases = {400: "ctx 0K", 1_499: "ctx 1K", 199_600: "ctx 200K", 1_240_000: "ctx 1.2M"}
+        cases = {
+            400: "ctx 0K",
+            1_499: "ctx 1K",
+            199_600: "ctx 200K",
+            1_240_000: "ctx 1.2M",
+        }
         for tokens, expected in cases.items():
             with self.subTest(tokens=tokens):
                 line = self._render(
@@ -761,7 +812,11 @@ class RenderSegmentsTests(unittest.TestCase):
                 self.assertIn(f"| {expected} |", line)
 
     def test_readings_near_a_limit_are_coloured(self) -> None:
-        warn, high, reset = collector.ANSI_WARN, collector.ANSI_HIGH, collector.ANSI_RESET
+        warn, high, reset = (
+            collector.ANSI_WARN,
+            collector.ANSI_HIGH,
+            collector.ANSI_RESET,
+        )
         line = self._render(
             self._document(
                 effort={"level": "max"}, context_window={"total_input_tokens": 150_000}
@@ -787,7 +842,9 @@ class RenderSegmentsTests(unittest.TestCase):
         document = self._document(context_window={"total_input_tokens": 250_000})
         with mock.patch.dict(os.environ, {"NO_COLOR": "1"}):
             plain = self._render(document, color=None)
-        environment = {key: value for key, value in os.environ.items() if key != "NO_COLOR"}
+        environment = {
+            key: value for key, value in os.environ.items() if key != "NO_COLOR"
+        }
         with mock.patch.dict(os.environ, environment, clear=True):
             coloured = self._render(document, color=None)
         self.assertNotIn("\033", plain)
@@ -795,9 +852,13 @@ class RenderSegmentsTests(unittest.TestCase):
 
     def _render_at(self, columns: int | None, **kwargs: object) -> str:
         config_dir = os.path.join(os.path.expanduser("~"), ".claude-account6")
-        self._write_scoped(self.state / "profiles" / ".claude-account6", self.NOW + 176400)
+        self._write_scoped(
+            self.state / "profiles" / ".claude-account6", self.NOW + 176400
+        )
         with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": config_dir}):
-            return self._render(kwargs.pop("document", self._document()), columns=columns, **kwargs)
+            return self._render(
+                kwargs.pop("document", self._document()), columns=columns, **kwargs
+            )
 
     def test_detail_is_shed_in_order_as_the_terminal_narrows(self) -> None:
         # Usable width is columns minus the four-column margin.
@@ -831,7 +892,8 @@ class RenderSegmentsTests(unittest.TestCase):
             "Fable 5.2 xhigh | ctx 212K | 5h 40% 1h58m | 7d 27% | Fable 45% -26 2d1h",
         )
         self.assertEqual(
-            coloured.replace(collector.ANSI_HIGH, "").replace(collector.ANSI_RESET, ""), plain
+            coloured.replace(collector.ANSI_HIGH, "").replace(collector.ANSI_RESET, ""),
+            plain,
         )
 
     def test_costly_effort_survives_the_narrowest_terminal(self) -> None:
@@ -871,7 +933,10 @@ class RenderSegmentsTests(unittest.TestCase):
             five_hour=_live_window(10),
             seven_day=_live_window(20),
             effort={"level": "high"},
-            context_window={"total_input_tokens": 61_000, "context_window_size": 1_000_000},
+            context_window={
+                "total_input_tokens": 61_000,
+                "context_window_size": 1_000_000,
+            },
         )
         with _Stdio(json.dumps(payload).encode()) as stdio:
             rc = collector.main([])
@@ -914,11 +979,14 @@ class ProfileScopedCacheTests(unittest.TestCase):
 
     def test_unset_or_default_config_dir_uses_root_state(self) -> None:
         for config_dir in (None, "~/.claude"):
-            with self.subTest(claude_config_dir=config_dir), mock.patch.dict(
-                os.environ,
-                self._env(
-                    HERDR_PLUGIN_STATE_DIR=str(self.state),
-                    CLAUDE_CONFIG_DIR=config_dir,
+            with (
+                self.subTest(claude_config_dir=config_dir),
+                mock.patch.dict(
+                    os.environ,
+                    self._env(
+                        HERDR_PLUGIN_STATE_DIR=str(self.state),
+                        CLAUDE_CONFIG_DIR=config_dir,
+                    ),
                 ),
             ):
                 self.assertEqual(
@@ -934,7 +1002,9 @@ class ProfileScopedCacheTests(unittest.TestCase):
                 CLAUDE_CONFIG_DIR="~/.claude-account3",
             ),
         ):
-            expected = self.state / "profiles" / ".claude-account3" / "claude-statusline.json"
+            expected = (
+                self.state / "profiles" / ".claude-account3" / "claude-statusline.json"
+            )
             self.assertEqual(collector.statusline_cache_path(), expected)
             self.assertEqual(
                 collector.root_statusline_cache_path(),
@@ -944,7 +1014,12 @@ class ProfileScopedCacheTests(unittest.TestCase):
     def test_non_home_config_dir_keys_by_sanitized_basename_and_digest(self) -> None:
         raw = "/opt/claude/team profile"
         digest = hashlib.sha256(os.path.normpath(raw).encode("utf-8")).hexdigest()[:12]
-        expected = self.state / "profiles" / f"team_profile-{digest}" / "claude-statusline.json"
+        expected = (
+            self.state
+            / "profiles"
+            / f"team_profile-{digest}"
+            / "claude-statusline.json"
+        )
         with mock.patch.dict(
             os.environ, self._env(HERDR_PLUGIN_STATE_DIR=str(self.state))
         ):
@@ -979,7 +1054,9 @@ class ProfileScopedCacheTests(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         self.assertNotIn("warning", errors)
-        profile_cache = self.state / "profiles" / ".claude-account3" / "claude-statusline.json"
+        profile_cache = (
+            self.state / "profiles" / ".claude-account3" / "claude-statusline.json"
+        )
         root_cache = self.state / "claude-statusline.json"
         for path in (profile_cache, root_cache):
             self.assertTrue(path.exists(), path)
