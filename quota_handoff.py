@@ -497,7 +497,12 @@ class OsPort:
         return result
 
     def server_peer(self):
-        """Kernel-authenticate the configured Unix listener; no application request."""
+        """Kernel-authenticate the configured Unix listener; no application request.
+
+        Platforms without SO_PEERCRED cannot authenticate the peer, so this fails closed.
+        """
+        if getattr(socket, "SO_PEERCRED", None) is None:
+            return None
         path = os.environ.get("HERDR_SOCKET_PATH")
         if not path or not os.path.isabs(path):
             return None

@@ -1633,9 +1633,17 @@ class TestCLI(FixtureTest):
 
     def test_enabled_malformed_event_json_exit_one(self):
         cfg = {"enabled": True, "allowed_workspaces": ["ws1"], "authority": AUTHORITY}
-        rc, value = self.call(["event"], cfg, {"HERDR_PLUGIN_EVENT_JSON": "[broken"})
+        with patch.object(qh.OsPort, "platform", "linux"):
+            rc, value = self.call(["event"], cfg, {"HERDR_PLUGIN_EVENT_JSON": "[broken"})
         self.assertEqual(rc, 1)
         self.assertEqual(value["status"], "error")
+
+    def test_darwin_platform_disabled_before_event_json_parsed(self):
+        cfg = {"enabled": True, "allowed_workspaces": ["ws1"], "authority": AUTHORITY}
+        with patch.object(qh.OsPort, "platform", "darwin"):
+            rc, value = self.call(["event"], cfg, {"HERDR_PLUGIN_EVENT_JSON": "[broken"})
+        self.assertEqual(rc, 0)
+        self.assertEqual(value["status"], "disabled")
 
     def test_enabled_event_json_end_to_end_with_safe_cli_and_os(self):
         cfg = {"enabled": True, "allowed_workspaces": ["ws1"], "authority": AUTHORITY, "claude_profiles": self.f.profiles}
@@ -1757,6 +1765,7 @@ class TestProcAdapter(unittest.TestCase):
 
     def test_socket_peer_credentials_checked_without_application_request(self):
         with patch.dict(os.environ, {"HERDR_SOCKET_PATH": "/fake/herdr.sock"}), \
+                patch.object(qh.socket, "SO_PEERCRED", 17, create=True), \
                 patch.object(qh.socket, "socket") as factory:
             connection = factory.return_value.__enter__.return_value
             connection.getsockopt.return_value = qh.struct.pack("3i", 500, os.getuid(), 0)
@@ -1765,6 +1774,15 @@ class TestProcAdapter(unittest.TestCase):
             connection.send.assert_not_called()
             connection.getsockopt.return_value = qh.struct.pack("3i", 500, os.getuid() + 1, 0)
             self.assertIsNone(qh.OsPort().server_peer())
+
+    def test_missing_peercred_option_fails_closed_without_creating_socket(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        stand_in = SimpleNamespace(socket=Mock())
+        with patch.dict(os.environ, {"HERDR_SOCKET_PATH": "/fake/herdr.sock"}), \
+                patch.object(qh, "socket", stand_in):
+            self.assertIsNone(qh.OsPort().server_peer())
+        stand_in.socket.assert_not_called()
 
     def test_missing_socket_proof_fails_closed(self):
         with patch.dict(os.environ, {}, clear=True), patch.object(qh.socket, "socket") as factory:
