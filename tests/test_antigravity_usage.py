@@ -135,6 +135,73 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(servers, [])
 
 
+class StoppedProcessTests(unittest.TestCase):
+    """``ps -o pid=,stat=,command=`` listings skip stopped or zombie lines."""
+
+    def test_stopped_and_zombie_agy_lines_are_skipped(self) -> None:
+        lines = [
+            "61001 Tl /Users/terry/.local/bin/agy --print-timeout 10m0s",
+            "61002 T agy",
+            "61003 Z /usr/local/bin/agy statusline",
+            "61004 Z+ agy --print-timeout 10m0s",
+        ]
+        for line in lines:
+            with self.subTest(line=line):
+                self.assertIsNone(helper.parse_language_server_line(line))
+
+    def test_stopped_and_zombie_language_server_lines_are_skipped(self) -> None:
+        command = APP_PS.strip().split(None, 1)[1]
+        for stat in ("T", "Tl", "Z", "Z+"):
+            with self.subTest(stat=stat):
+                self.assertIsNone(
+                    helper.parse_language_server_line(f"42389 {stat} {command}")
+                )
+
+    def test_running_state_lines_are_kept(self) -> None:
+        for stat in ("Sl+", "S", "R+", "R"):
+            with self.subTest(stat=stat):
+                parsed = helper.parse_language_server_line(
+                    f"61001 {stat} /Users/terry/.local/bin/agy --print-timeout 10m0s"
+                )
+                self.assertEqual(parsed, (61001, None, "cli"))
+        command = APP_PS.strip().split(None, 1)[1]
+        parsed = helper.parse_language_server_line(f"42389 Sl+ {command}")
+        self.assertEqual(parsed, (42389, SYNTHETIC_CSRF, "app"))
+
+    def test_legacy_two_field_lines_still_parse(self) -> None:
+        self.assertEqual(
+            helper.parse_language_server_line(AGY_PS), (61001, None, "cli")
+        )
+        self.assertEqual(
+            helper.parse_language_server_line(APP_PS), (42389, SYNTHETIC_CSRF, "app")
+        )
+        self.assertIsNone(helper.parse_language_server_line(IDE_PS))
+
+    def test_state_token_without_a_command_is_skipped(self) -> None:
+        for line in ("61005 Z+", "61005 Tl", "61005"):
+            with self.subTest(line=line):
+                self.assertIsNone(helper.parse_language_server_line(line))
+
+    def test_discovery_never_probes_a_stopped_process(self) -> None:
+        probed: list[int] = []
+
+        def lsof_for_pid(pid: int) -> str:
+            probed.append(pid)
+            return LSOF
+
+        servers = helper.discover_servers(
+            ps_output=(
+                "61001 T /Users/terry/.local/bin/agy --print-timeout 10m0s\n"
+                "61002 Z+ /Users/terry/.local/bin/agy --print-timeout 10m0s\n"
+                "61003 Sl+ /Users/terry/.local/bin/agy --print-timeout 10m0s\n"
+            ),
+            lsof_for_pid=lsof_for_pid,
+        )
+
+        self.assertEqual([server.pid for server in servers], [61003])
+        self.assertEqual(probed, [61003])
+
+
 class FetchTests(unittest.TestCase):
     def test_posts_csrf_and_returns_normalized_window(self) -> None:
         payload = json.loads(

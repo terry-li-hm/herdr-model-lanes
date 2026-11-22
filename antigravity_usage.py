@@ -36,6 +36,11 @@ CONNECT_PATH = "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaS
 LOOPBACK_HOST = "127.0.0.1"
 WEEKLY_WINDOW_SECONDS = 604_800
 FIVE_HOUR_WINDOW_SECONDS = 5 * 3_600
+# A ``ps -o stat=`` token: a process state letter optionally followed by
+# flag letters, digits or priority markers. Matched only when a separate
+# command token follows, so a bare ``agy`` or a command path is never
+# mistaken for a state.
+PROCESS_STATE_PATTERN = re.compile(r"[RSDTZXIUtW][a-zA-Z0-9+<]*")
 REQUEST_BODY = json.dumps(
     {
         "metadata": {
@@ -115,7 +120,9 @@ def parse_quota_summary(payload: dict) -> dict:
 
     candidates: list[tuple[float, int, str]] = []
     for group in groups:
-        if not isinstance(group, dict) or not _is_gemini_group(group.get("displayName")):
+        if not isinstance(group, dict) or not _is_gemini_group(
+            group.get("displayName")
+        ):
             continue
         buckets = group.get("buckets")
         if not isinstance(buckets, list):
@@ -131,7 +138,9 @@ def parse_quota_summary(payload: dict) -> dict:
     if not candidates:
         raise AntigravityUsageError("quota summary has no Gemini remaining fraction")
 
-    fraction, window_seconds, reset = min(candidates, key=lambda item: (item[0], -item[1]))
+    fraction, window_seconds, reset = min(
+        candidates, key=lambda item: (item[0], -item[1])
+    )
     remaining_percent = round(100 * fraction)
     return {
         "gemini": {
@@ -152,18 +161,31 @@ def _parse_csrf(command: str) -> str | None:
 
 
 def parse_language_server_line(line: str) -> tuple[int, str | None, str] | None:
-    """Return ``(pid, csrf, kind)`` for an Antigravity app or agy CLI line."""
+    """Return ``(pid, csrf, kind)`` for an Antigravity app or agy CLI line.
+
+    Accepts both the ``pid stat command`` listing produced by
+    ``ps -o pid=,stat=,command=`` and the legacy ``pid command`` shape.
+    A state token is recognized only when a command token follows it, so
+    commands like ``/usr/local/bin/agy`` or ``agy`` are never mistaken
+    for one. Stopped (``T*``) and zombie (``Z*``) processes return None so
+    an orphaned CLI is never probed over loopback TCP.
+    """
     stripped = line.strip()
     if not stripped:
         return None
-    parts = stripped.split(None, 1)
-    if len(parts) != 2:
-        return None
+    parts = stripped.split(None, 2)
     try:
         pid = int(parts[0])
     except ValueError:
         return None
-    command = parts[1]
+    if len(parts) == 1:
+        return None
+    if len(parts) == 3 and PROCESS_STATE_PATTERN.fullmatch(parts[1]):
+        if parts[1][0] in "TZ":
+            return None
+        command = parts[2]
+    else:
+        command = stripped.split(None, 1)[1]
     lowered = command.lower()
     if "antigravity-ide" in lowered or "--app_data_dir antigravity-ide" in lowered:
         return None
@@ -196,9 +218,13 @@ def _run(command: list[str], timeout: int) -> str:
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise AntigravityUsageError(f"{command[0]} failed: {type(exc).__name__}") from exc
+        raise AntigravityUsageError(
+            f"{command[0]} failed: {type(exc).__name__}"
+        ) from exc
     if completed.returncode != 0:
-        raise AntigravityUsageError(f"{command[0]} failed with rc={completed.returncode}")
+        raise AntigravityUsageError(
+            f"{command[0]} failed with rc={completed.returncode}"
+        )
     return completed.stdout
 
 
@@ -208,7 +234,7 @@ def discover_servers(
 ) -> list[LocalServer]:
     """Find same-user Antigravity loopback quota servers. App before CLI."""
     if ps_output is None:
-        ps_output = _run(["ps", "-ax", "-o", "pid=,command="], PS_TIMEOUT_SECS)
+        ps_output = _run(["ps", "-ax", "-o", "pid=,stat=,command="], PS_TIMEOUT_SECS)
     found: list[LocalServer] = []
     for line in ps_output.splitlines():
         parsed = parse_language_server_line(line)
@@ -226,7 +252,9 @@ def discover_servers(
             lsof_payload = lsof_for_pid(pid)
         for port in parse_lsof_ports(lsof_payload):
             found.append(LocalServer(pid, port, csrf, kind))
-    found.sort(key=lambda server: (0 if server.kind == "app" else 1, server.pid, server.port))
+    found.sort(
+        key=lambda server: (0 if server.kind == "app" else 1, server.pid, server.port)
+    )
     return found
 
 
@@ -265,7 +293,9 @@ def _open(request: urllib.request.Request, timeout: int):
         context = ssl._create_unverified_context()
     opener = urllib.request.build_opener(
         RejectRedirectHandler,
-        urllib.request.HTTPSHandler(context=context) if context else urllib.request.HTTPHandler(),
+        urllib.request.HTTPSHandler(context=context)
+        if context
+        else urllib.request.HTTPHandler(),
     )
     return opener.open(request, timeout=timeout)
 
@@ -297,7 +327,9 @@ def fetch_quota(
             with open_fn(request, timeout) as response:
                 status = getattr(response, "status", 200) or 200
                 if status != 200:
-                    last_error = AntigravityUsageError(f"quota endpoint returned HTTP {status}")
+                    last_error = AntigravityUsageError(
+                        f"quota endpoint returned HTTP {status}"
+                    )
                     continue
                 body = response.read(MAX_RESPONSE_BYTES)
         except AntigravityUsageError as exc:
@@ -331,7 +363,9 @@ def fetch_from_local(
         except AntigravityUsageError as exc:
             last_error = exc
             continue
-    raise last_error or AntigravityUsageError("no local Antigravity quota server is running")
+    raise last_error or AntigravityUsageError(
+        "no local Antigravity quota server is running"
+    )
 
 
 def main() -> int:
