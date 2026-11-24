@@ -86,8 +86,10 @@ names in `~/.env.resolved`, then `~/.pi/agent/models.json`
 `GET {base}/api/monitor/usage/quota/limit` with `Authorization: Bearer <key>`
 and prints only the normalized five-hour token window (the `TOKENS_LIMIT`
 entry with the nearest reset). The base is `https://open.bigmodel.cn` when the
-key came from a Zhipu/BigModel source and `https://api.z.ai` otherwise,
-overridable with `MODEL_LANES_GLM_BASE`. No key is ever stored, logged, or
+key came from a Zhipu/BigModel source and `https://api.z.ai` otherwise.
+Leave `MODEL_LANES_GLM_BASE` unset or empty, or set it to that exact HTTPS
+base with an optional single trailing `/`. Any other value is rejected before
+a request is made. No key is ever stored, logged, or
 cached. The `Gl` segment uses the same `!`/`!!`/`~` rules, refreshes at a
 five-minute cadence (the window is five hours), shows `Gl n/a` when no key is
 available, and the router judges it on a five-hour pace, not a weekly one.

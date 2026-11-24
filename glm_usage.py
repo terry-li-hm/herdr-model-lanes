@@ -118,8 +118,15 @@ def _find_key(env: Callable[[str], str] | None = None) -> tuple[str, str] | None
     return None
 
 
+def _canonical_base(value: str, *allowed: str) -> str:
+    for base in allowed:
+        if value in (base, base + "/"):
+            return base
+    raise GlmUsageError("unapproved GLM base URL")
+
+
 def resolve_key(env: Callable[[str], str] | None = None) -> tuple[str, str]:
-    """Resolve the API key and base URL, honouring ``MODEL_LANES_GLM_BASE``."""
+    """Resolve the API key and restrict its base URL to the discovered realm."""
     found = _find_key(env)
     if found is None:
         raise GlmUsageError("no GLM API key found")
@@ -129,7 +136,7 @@ def resolve_key(env: Callable[[str], str] | None = None) -> tuple[str, str]:
         if env is not None
         else os.environ.get("MODEL_LANES_GLM_BASE")
     )
-    return key, (override or base).rstrip("/")
+    return key, _canonical_base(override or base, base)
 
 
 def key_available(env: Callable[[str], str] | None = None) -> bool:
@@ -215,6 +222,7 @@ def fetch_quota(
     opener: Callable[[urllib.request.Request, int], object] | None = None,
 ) -> dict:
     """Fetch and normalize the five-hour token window."""
+    base = _canonical_base(base, BIGMODEL_BASE, ZAI_BASE)
     request = urllib.request.Request(
         f"{base}{QUOTA_PATH}",
         headers={

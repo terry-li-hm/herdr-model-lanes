@@ -1,5 +1,7 @@
 import contextlib
+import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -179,18 +181,106 @@ class KeyLookupTests(unittest.TestCase):
         ):
             helper.resolve_key(env_from({}))
 
-    def test_base_override_wins(self) -> None:
-        key, base = helper.resolve_key(
-            env_from(
-                {
-                    "ZAI_KEY": SYNTHETIC_KEY,
-                    "MODEL_LANES_GLM_BASE": "https://proxy.invalid",
-                }
-            )
-        )
 
-        self.assertEqual(key, SYNTHETIC_KEY)
-        self.assertEqual(base, "https://proxy.invalid")
+@contextlib.contextmanager
+def recording_opener():
+    payload = json.loads((FIXTURES / "quota-healthy.json").read_text(encoding="utf-8"))
+    with mock.patch("glm_usage.urllib.request.build_opener") as build:
+        opener = build.return_value.open
+        opener.return_value = FakeResponse(payload)
+        yield opener
+
+
+class RealmBindingTests(unittest.TestCase):
+    realms = (("ZAI_KEY", helper.ZAI_BASE), ("BIGMODEL_API_KEY", helper.BIGMODEL_BASE))
+
+    def test_key_only_sent_to_discovered_realm(self) -> None:
+        for name, base in self.realms:
+            for override in (None, "", base, base + "/"):
+                env = {name: SYNTHETIC_KEY}
+                if override is not None:
+                    env["MODEL_LANES_GLM_BASE"] = override
+                with (
+                    self.subTest(name=name, override=override),
+                    isolated_lookup(),
+                    recording_opener() as opener,
+                ):
+                    key, resolved = helper.resolve_key(env.get)
+                    self.assertEqual(resolved, base)
+                    helper.fetch_quota(key, resolved)
+                    opener.assert_called_once()
+                    request = opener.call_args.args[0]
+                    self.assertEqual(request.full_url, base + helper.QUOTA_PATH)
+                    self.assertIsNone(request.data)
+                    headers = dict(request.header_items())
+                    self.assertEqual(
+                        headers.pop("Authorization"), f"Bearer {SYNTHETIC_KEY}"
+                    )
+                    self.assertNotIn(SYNTHETIC_KEY, str(headers))
+
+    def test_unapproved_overrides_fail_without_opening_or_leaking(self) -> None:
+        for name, base in self.realms:
+            other = (
+                helper.ZAI_BASE
+                if base == helper.BIGMODEL_BASE
+                else helper.BIGMODEL_BASE
+            )
+            for override in (
+                other,
+                base.replace("https:", "http:"),
+                "https://proxy.invalid",
+                base + "/path",
+                base + "?q=1",
+                base + "#fragment",
+                base.replace("://", "://u@"),
+                base + ":8443",
+                base + "//",
+                " " + base,
+            ):
+                with (
+                    self.subTest(name=name, override=override),
+                    isolated_lookup(),
+                    mock.patch.dict(
+                        os.environ,
+                        {name: SYNTHETIC_KEY, "MODEL_LANES_GLM_BASE": override},
+                        clear=True,
+                    ),
+                    recording_opener() as opener,
+                    contextlib.redirect_stdout(io.StringIO()) as stdout,
+                    contextlib.redirect_stderr(io.StringIO()) as stderr,
+                ):
+                    with self.assertRaises(helper.GlmUsageError) as raised:
+                        helper.resolve_key()
+                    self.assertNotEqual(helper.main(), 0)
+                    opener.assert_not_called()
+                    output = (
+                        str(raised.exception) + stdout.getvalue() + stderr.getvalue()
+                    )
+                    self.assertNotIn(override, output)
+                    self.assertNotIn(SYNTHETIC_KEY, output)
+
+    def test_direct_fetch_rejects_unapproved_base(self) -> None:
+        base = "https://proxy.invalid"
+        with (
+            recording_opener() as opener,
+            contextlib.redirect_stdout(io.StringIO()) as stdout,
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+            self.assertRaises(helper.GlmUsageError) as raised,
+        ):
+            helper.fetch_quota(SYNTHETIC_KEY, base)
+        opener.assert_not_called()
+        output = str(raised.exception) + stdout.getvalue() + stderr.getvalue()
+        self.assertNotIn(base, output)
+        self.assertNotIn(SYNTHETIC_KEY, output)
+
+    def test_direct_fetch_normalizes_single_slash(self) -> None:
+        for _, base in self.realms:
+            with self.subTest(base=base), recording_opener() as opener:
+                helper.fetch_quota(SYNTHETIC_KEY, base + "/")
+                opener.assert_called_once()
+                self.assertEqual(
+                    opener.call_args.args[0].full_url, base + helper.QUOTA_PATH
+                )
 
 
 class ParsingTests(unittest.TestCase):
@@ -308,8 +398,6 @@ class FetchTests(unittest.TestCase):
     def test_main_prints_credential_free_error_when_key_missing(
         self, resolve_key: mock.Mock
     ) -> None:
-        import io
-
         resolve_key.side_effect = helper.GlmUsageError("no GLM API key found")
         stderr = io.StringIO()
 
