@@ -128,8 +128,9 @@ class GlmUsage:
 
 @dataclass(frozen=True)
 class AntigravityUsage:
-    gemini: QuotaWindow
+    gemini: QuotaWindow | None
     fetched_at: int
+    third_party: QuotaWindow | None = None
 
 
 @dataclass(frozen=True)
@@ -318,11 +319,18 @@ def parse_antigravity_usage(payload: dict, fetched_at: int) -> AntigravityUsage:
     if not isinstance(payload, dict):
         raise QuotaError("Antigravity helper payload is not an object")
     gemini = _parse_antigravity_window(payload.get("gemini"), "Antigravity gemini")
-    if gemini is None:
-        raise QuotaError("Antigravity helper payload has no gemini window")
-    if gemini.resets_at is None:
+    third_party = _parse_antigravity_window(
+        payload.get("third_party"), "Antigravity third_party"
+    )
+    if gemini is None and third_party is None:
+        raise QuotaError("Antigravity gemini window missing")
+    if gemini is not None and gemini.resets_at is None:
         raise QuotaError("Antigravity helper gemini window has no reset timestamp")
-    return AntigravityUsage(gemini=gemini, fetched_at=fetched_at)
+    if third_party is not None and third_party.resets_at is None:
+        raise QuotaError("Antigravity helper third_party window has no reset timestamp")
+    return AntigravityUsage(
+        gemini=gemini, fetched_at=fetched_at, third_party=third_party
+    )
 
 
 def parse_kimi_usage(payload: dict, fetched_at: int) -> KimiUsage:
@@ -500,7 +508,11 @@ def format_quota(
         usage = value if isinstance(value, usage_type) else None
         text = f"{label} n/a"
         if usage is not None:
-            text = _format_window(label, window_of(usage), now, stales[key])
+            # A window can be absent (Antigravity third-party-only), so the
+            # segment falls back to n/a instead of dereferencing None.
+            window = window_of(usage)
+            if window is not None:
+                text = _format_window(label, window, now, stales[key])
         line += f" | {text}"
     return line
 
@@ -575,10 +587,12 @@ def format_sidebar_rows(
     }
     for key, usage_type, label, window_of in _optional_segments():
         usage = values[key]
-        if isinstance(usage, usage_type):
-            other_segments.append(
-                _sidebar_segment(label, window_of(usage), now, stales[key])
-            )
+        if not isinstance(usage, usage_type):
+            continue
+        window = window_of(usage)
+        if window is None:
+            continue
+        other_segments.append(_sidebar_segment(label, window, now, stales[key]))
 
     return (
         _fit_sidebar_segments(core_segments),
@@ -724,34 +738,50 @@ def load_glm_cache(path: Path) -> GlmUsage | None:
         return None
 
 
+def _antigravity_window_to_dict(window: QuotaWindow) -> dict:
+    payload = _window_to_dict(window) or {}
+    payload["window_seconds"] = window.window_seconds
+    return payload
+
+
 def save_antigravity_cache(path: Path, usage: AntigravityUsage) -> None:
-    payload = _window_to_dict(usage.gemini) or {}
-    payload["window_seconds"] = usage.gemini.window_seconds
-    _save_json(
-        path,
-        {"gemini": payload, "fetched_at": usage.fetched_at},
-    )
+    payload: dict[str, object] = {}
+    if usage.gemini is not None:
+        payload["gemini"] = _antigravity_window_to_dict(usage.gemini)
+    if usage.third_party is not None:
+        payload["third_party"] = _antigravity_window_to_dict(usage.third_party)
+    payload["fetched_at"] = usage.fetched_at
+    _save_json(path, payload)
+
+
+def _load_antigravity_window(raw: object) -> QuotaWindow | None:
+    """One cached window; ``None`` only for an absent key, else raise."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise TypeError("window is not an object")
+    used = int(raw["used_percent"])
+    remaining = int(raw["remaining_percent"])
+    resets_raw = raw.get("resets_at")
+    if resets_raw is None:
+        raise ValueError("window has no reset timestamp")
+    window_seconds = int(raw.get("window_seconds", ROUTE_WINDOW_SECONDS))
+    if not 0 <= used <= 100 or not 0 <= remaining <= 100 or window_seconds <= 0:
+        raise ValueError("window values out of range")
+    return QuotaWindow(used, remaining, int(resets_raw), window_seconds)
 
 
 def load_antigravity_cache(path: Path) -> AntigravityUsage | None:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-        gemini_raw = raw["gemini"]
-        if not isinstance(gemini_raw, dict):
+        if not isinstance(raw, dict):
             return None
-        used = int(gemini_raw["used_percent"])
-        remaining = int(gemini_raw["remaining_percent"])
-        resets_raw = gemini_raw.get("resets_at")
-        if resets_raw is None:
+        gemini = _load_antigravity_window(raw.get("gemini"))
+        third_party = _load_antigravity_window(raw.get("third_party"))
+        if gemini is None and third_party is None:
             return None
-        window_seconds = int(gemini_raw.get("window_seconds", ROUTE_WINDOW_SECONDS))
-        if not 0 <= used <= 100 or not 0 <= remaining <= 100 or window_seconds <= 0:
-            return None
-        return AntigravityUsage(
-            QuotaWindow(used, remaining, int(resets_raw), window_seconds),
-            int(raw["fetched_at"]),
-        )
-    except (OSError, KeyError, TypeError, ValueError, QuotaError):
+        return AntigravityUsage(gemini, int(raw["fetched_at"]), third_party)
+    except (OSError, KeyError, TypeError, ValueError):
         return None
 
 
@@ -2230,6 +2260,21 @@ def collect_usage(force: bool, state_dir: Path, now: int) -> list[UsageRow]:
                 error,
             )
         )
+        if (
+            name == "antigravity"
+            and usage is not None
+            and usage.third_party is not None
+        ):
+            # The Claude/GPT pool rides the same reading; no second refresh.
+            rows.append(
+                UsageRow(
+                    "antigravity_claude",
+                    "Antigravity Claude (AgC)",
+                    usage.third_party,
+                    stale,
+                    error,
+                )
+            )
     return rows
 
 

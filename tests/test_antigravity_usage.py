@@ -53,7 +53,13 @@ class ParseTests(unittest.TestCase):
                     "remaining_percent": 42,
                     "resets_at": "2026-08-29T10:10:41Z",
                     "window_seconds": helper.WEEKLY_WINDOW_SECONDS,
-                }
+                },
+                "third_party": {
+                    "used_percent": 0,
+                    "remaining_percent": 100,
+                    "resets_at": "2026-08-29T10:10:41Z",
+                    "window_seconds": helper.WEEKLY_WINDOW_SECONDS,
+                },
             },
         )
 
@@ -69,6 +75,97 @@ class ParseTests(unittest.TestCase):
             window["gemini"]["window_seconds"], helper.FIVE_HOUR_WINDOW_SECONDS
         )
         self.assertEqual(window["gemini"]["resets_at"], "2026-08-22T14:10:41Z")
+        self.assertNotIn("third_party", window)
+
+    def test_picks_tightest_third_party_bucket(self) -> None:
+        payload = {
+            "response": {
+                "groups": [
+                    {
+                        "displayName": "Gemini Models",
+                        "buckets": [
+                            {
+                                "bucketId": "gemini-weekly",
+                                "window": "weekly",
+                                "remainingFraction": 0.42,
+                                "resetTime": "2026-08-29T10:10:41Z",
+                            }
+                        ],
+                    },
+                    {
+                        "displayName": "Claude and GPT models",
+                        "buckets": [
+                            {
+                                "bucketId": "3p-weekly",
+                                "window": "weekly",
+                                "remainingFraction": 0.7,
+                                "resetTime": "2026-08-29T10:10:41Z",
+                            },
+                            {
+                                "bucketId": "3p-5h",
+                                "window": "five_hour",
+                                "remainingFraction": 0.5,
+                                "resetTime": "2026-08-22T14:10:41Z",
+                            },
+                        ],
+                    },
+                ]
+            }
+        }
+
+        window = helper.parse_quota_summary(payload)
+
+        self.assertEqual(window["third_party"]["used_percent"], 50)
+        self.assertEqual(window["third_party"]["remaining_percent"], 50)
+        self.assertEqual(
+            window["third_party"]["window_seconds"], helper.FIVE_HOUR_WINDOW_SECONDS
+        )
+        self.assertEqual(window["third_party"]["resets_at"], "2026-08-22T14:10:41Z")
+
+    def test_third_party_group_detection(self) -> None:
+        for name in (
+            "Claude and GPT models",
+            "Third-party models",
+            "3P Pool",
+            "Claude Opus and Sonnet",
+            "gpt",
+        ):
+            self.assertTrue(helper._is_third_party_group(name), name)
+        for name in ("Gemini Models", "Grok Models", "", None, 42):
+            self.assertFalse(helper._is_third_party_group(name), name)
+
+    def test_unreadable_third_party_reset_never_costs_the_gemini_window(self) -> None:
+        payload = {
+            "response": {
+                "groups": [
+                    {
+                        "displayName": "Gemini Models",
+                        "buckets": [
+                            {
+                                "bucketId": "gemini-weekly",
+                                "remainingFraction": 0.42,
+                                "resetTime": "2026-08-29T10:10:41Z",
+                            }
+                        ],
+                    },
+                    {
+                        "displayName": "Claude and GPT models",
+                        "buckets": [
+                            {
+                                "bucketId": "3p-weekly",
+                                "remainingFraction": 0.5,
+                                "resetTime": "not a timestamp",
+                            }
+                        ],
+                    },
+                ]
+            }
+        }
+
+        window = helper.parse_quota_summary(payload)
+
+        self.assertEqual(window["gemini"]["remaining_percent"], 42)
+        self.assertNotIn("third_party", window)
 
     def test_rejects_missing_gemini_group(self) -> None:
         with self.assertRaisesRegex(helper.AntigravityUsageError, "Gemini"):

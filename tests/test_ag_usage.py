@@ -26,6 +26,10 @@ CLAUDE_OK = quota.ClaudeUsage(window(9, 91, 5 * 86_400), None, None, NOW)
 GROK_OK = quota.GrokUsage(window(70, 30, 3 * 86_400), NOW)
 GLM_OK = quota.GlmUsage(window(50, 50, 2 * 3_600, quota.GLM_WINDOW_SECONDS), NOW)
 ANTIGRAVITY_OK = quota.AntigravityUsage(window(10, 90, 6 * 86_400), NOW)
+# Gemini window plus a third-party (Claude/GPT) five-hour pool reading.
+ANTIGRAVITY_CLAUDE = quota.AntigravityUsage(
+    window(10, 90, 6 * 86_400), NOW, window(40, 60, 2 * 3_600, 18_000)
+)
 KIMI_OK = quota.KimiUsage(window(20, 80, 4 * 86_400), NOW)
 CURSOR_OK = quota.CursorUsage(window(40, 60, 12 * 86_400), NOW)
 
@@ -140,6 +144,55 @@ class UsageCommandTests(unittest.TestCase):
         self.assertIn("Antigravity Gemini (Ag) 90% · 6d0h", out)
         self.assertIn("Kimi coding (Km) 80% · 4d0h", out)
         self.assertIn("Cursor monthly (Cu) 60% · 12d0h", out)
+
+    def test_antigravity_claude_row_in_plain_plan_and_json(self) -> None:
+        self.stub_refresh("antigravity", ANTIGRAVITY_CLAUDE)
+
+        code, plain = self.run_usage([])
+
+        self.assertEqual(code, 0)
+        self.assertIn("Antigravity Gemini (Ag) 90% · 6d0h", plain)
+        self.assertIn("Antigravity Claude (AgC) 60% · 2h", plain)
+        self.assertLess(
+            plain.index("Antigravity Gemini (Ag)"),
+            plain.index("Antigravity Claude (AgC)"),
+        )
+        # One refresh serves both pools.
+        self.assertEqual(self.calls["antigravity"], [False])
+
+        code, planned = self.run_usage(["--plan"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("Antigravity Claude (AgC) 60% · 2h [on_pace]", planned)
+
+        code, encoded = self.run_usage(["--json"])
+
+        self.assertEqual(code, 0)
+        providers = json.loads(encoded)["providers"]
+        self.assertIn("antigravity_claude", providers)
+        self.assertEqual(providers["antigravity_claude"]["remaining_percent"], 60)
+        self.assertEqual(providers["antigravity_claude"]["resets_at"], NOW + 7_200)
+        self.assertFalse(providers["antigravity_claude"]["stale"])
+        self.assertIsNone(providers["antigravity_claude"]["error"])
+
+    def test_antigravity_claude_omitted_without_third_party(self) -> None:
+        for argv in ([], ["--plan"], ["--json"]):
+            with self.subTest(argv=argv):
+                code, out = self.run_usage(argv)
+
+                self.assertEqual(code, 0)
+                self.assertNotIn("antigravity_claude", out)
+                self.assertNotIn("AgC", out)
+
+    def test_antigravity_claude_omitted_when_the_reader_fails(self) -> None:
+        self.stub_refresh("antigravity", None, error="Antigravity offline")
+
+        code, out = self.run_usage([])
+
+        self.assertEqual(code, 0)
+        self.assertIn("Antigravity Gemini (Ag) n/a (Antigravity offline)", out)
+        self.assertNotIn("AgC", out)
+        self.assertEqual(self.calls["antigravity"], [False])
 
     def test_json_output_is_stable_and_normalized(self) -> None:
         for name, usage in (

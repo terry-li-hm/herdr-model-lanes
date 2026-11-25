@@ -5,8 +5,9 @@ for every render and pipes one JSON document over stdin. This collector
 reads at most 1 MiB of that document, normalizes the ``quota`` bucket map
 (the CLI reports remaining fractions per bucket, e.g. ``gemini-5h`` and
 ``gemini-weekly``), and persists the tightest Gemini window — normalized
-used/remaining percentages and reset epoch — into the plugin state
-directory as ``antigravity-quota.json``, the cache
+used/remaining percentages and reset epoch — plus, when the payload reports
+third-party (``3p``, Claude/GPT) buckets, the tightest of those, into the
+plugin state directory as ``antigravity-quota.json``, the cache
 ``herdr_model_lanes.load_antigravity_cache`` reads. Every other input
 field — ``session_id``, ``model``, ``workspace``/``cwd``, transcript paths
 — is used only to render a status line and is never persisted. The
@@ -241,19 +242,55 @@ def tightest_gemini_window(windows: dict[str, dict]) -> dict | None:
     )
 
 
-def save_cache(path: Path, fetched_at: int, window: dict) -> None:
-    """Atomically persist the normalized Gemini window with mode 0600."""
-    payload = json.dumps(
-        {
-            "gemini": {
-                "used_percent": window["used_percent"],
-                "remaining_percent": window["remaining_percent"],
-                "resets_at": window["resets_at"],
-                "window_seconds": window["window_seconds"],
-            },
-            "fetched_at": fetched_at,
+def tightest_third_party_window(windows: dict[str, dict]) -> dict | None:
+    """Pick the tightest third-party (Claude/GPT) bucket, when present.
+
+    Candidates are ``3p-5h``, ``3p-weekly`` and any bucket whose lowercase
+    id starts with ``3p`` or ``claude``; the smallest remaining fraction
+    wins, with the longer window breaking a tie. Returns ``None`` when the
+    CLI reports no third-party pool.
+    """
+    candidates = [
+        window
+        for bucket_id, window in windows.items()
+        if bucket_id in (THIRD_PARTY_FIVE_HOUR_ID, THIRD_PARTY_WEEKLY_ID)
+        or bucket_id.lower().startswith(("3p", "claude"))
+    ]
+    if not candidates:
+        return None
+    return min(
+        candidates,
+        key=lambda window: (window["remaining_fraction"], -window["window_seconds"]),
+    )
+
+
+def save_cache(
+    path: Path, fetched_at: int, window: dict | None, third_party: dict | None = None
+) -> None:
+    """Atomically persist the normalized windows with mode 0600.
+
+    The Gemini window keeps the exact ``"gemini"`` schema it always had,
+    and a third-party window, when known, is stored beside it under
+    ``"third_party"`` with the same four keys. Callers that pass only a
+    Gemini window keep writing the legacy two-key payload.
+    """
+    payload: dict[str, dict | int] = {}
+    if window is not None:
+        payload["gemini"] = {
+            "used_percent": window["used_percent"],
+            "remaining_percent": window["remaining_percent"],
+            "resets_at": window["resets_at"],
+            "window_seconds": window["window_seconds"],
         }
-    ).encode("utf-8")
+    if third_party is not None:
+        payload["third_party"] = {
+            "used_percent": third_party["used_percent"],
+            "remaining_percent": third_party["remaining_percent"],
+            "resets_at": third_party["resets_at"],
+            "window_seconds": third_party["window_seconds"],
+        }
+    payload["fetched_at"] = fetched_at
+    encoded = json.dumps(payload).encode("utf-8")
     directory = path.parent
     directory.mkdir(parents=True, mode=0o700, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(
@@ -262,7 +299,7 @@ def save_cache(path: Path, fetched_at: int, window: dict) -> None:
     try:
         os.chmod(temp_name, 0o600)
         with os.fdopen(fd, "wb") as handle:
-            handle.write(payload)
+            handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_name, path)
@@ -666,9 +703,14 @@ def main(argv: list[str] | None = None) -> int:
             raise StatuslineError("status-line input is not valid JSON") from exc
         windows = parse_quota_document(document, now)
         gemini = tightest_gemini_window(windows)
-        if gemini is not None and session_is_current(document, now):
+        third_party = tightest_third_party_window(windows)
+        if (gemini is not None or third_party is not None) and session_is_current(
+            document, now
+        ):
             try:
-                save_cache(statusline_cache_path(), now, gemini)
+                save_cache(
+                    statusline_cache_path(), now, gemini, third_party=third_party
+                )
             except OSError:
                 # A cache write failure must never suppress an existing
                 # status line; warn once and keep displaying.

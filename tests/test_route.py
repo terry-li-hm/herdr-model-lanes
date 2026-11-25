@@ -467,6 +467,59 @@ class AntigravityTests(unittest.TestCase):
 
         self.assertEqual(usage.gemini.remaining_percent, 100)
         self.assertEqual(usage.gemini.window_seconds, WEEK)
+        self.assertIsNone(usage.third_party)
+
+    def test_parse_antigravity_usage_with_third_party(self) -> None:
+        payload = {
+            "gemini": {
+                "used_percent": 14,
+                "remaining_percent": 86,
+                "resets_at": "2026-08-29T10:10:41Z",
+                "window_seconds": WEEK,
+            },
+            "third_party": {
+                "used_percent": 22,
+                "remaining_percent": 78,
+                "resets_at": "2026-08-29T10:10:41Z",
+                "window_seconds": WEEK,
+            },
+        }
+
+        usage = quota.parse_antigravity_usage(payload, fetched_at=NOW)
+
+        self.assertEqual(usage.gemini.remaining_percent, 86)
+        self.assertEqual(usage.third_party.remaining_percent, 78)
+        self.assertEqual(usage.third_party.window_seconds, WEEK)
+        self.assertEqual(usage.fetched_at, NOW)
+
+    def test_parse_antigravity_usage_third_party_only(self) -> None:
+        payload = {
+            "third_party": {
+                "used_percent": 22,
+                "remaining_percent": 78,
+                "resets_at": "2026-08-29T10:10:41Z",
+                "window_seconds": WEEK,
+            }
+        }
+
+        usage = quota.parse_antigravity_usage(payload, fetched_at=NOW)
+
+        self.assertIsNone(usage.gemini)
+        self.assertEqual(usage.third_party.remaining_percent, 78)
+
+    def test_rejects_malformed_third_party_window(self) -> None:
+        payload = {
+            "gemini": {
+                "used_percent": 0,
+                "remaining_percent": 100,
+                "resets_at": "2026-08-29T10:10:41Z",
+                "window_seconds": WEEK,
+            },
+            "third_party": "not-a-window",
+        }
+
+        with self.assertRaisesRegex(quota.QuotaError, "third_party"):
+            quota.parse_antigravity_usage(payload, fetched_at=NOW)
 
     def test_rejects_missing_gemini_window(self) -> None:
         with self.assertRaisesRegex(quota.QuotaError, "gemini"):
@@ -488,6 +541,19 @@ class AntigravityTests(unittest.TestCase):
             "Cx n/a | Cl n/a | Ag n/a",
         )
 
+    def test_ag_na_when_gemini_window_missing_but_third_party_present(self) -> None:
+        antigravity = quota.AntigravityUsage(None, NOW, window(50, WEEK))
+
+        self.assertEqual(
+            quota.format_quota(None, None, NOW, antigravity=antigravity),
+            "Cx n/a | Cl n/a | Ag n/a",
+        )
+        core, other = quota.format_sidebar_rows(
+            None, None, NOW, antigravity=antigravity
+        )
+        self.assertEqual(core, "")
+        self.assertEqual(other, "")
+
     def test_antigravity_cache_round_trip(self) -> None:
         usage = quota.AntigravityUsage(window(42, WEEK), NOW)
         with tempfile.TemporaryDirectory() as directory:
@@ -496,9 +562,70 @@ class AntigravityTests(unittest.TestCase):
 
             loaded = quota.load_antigravity_cache(path)
             self.assertEqual(loaded, usage)
+            self.assertIsNone(loaded.third_party)
             self.assertEqual(
                 set(json.loads(path.read_text())), {"gemini", "fetched_at"}
             )
+
+    def test_antigravity_cache_round_trip_with_third_party(self) -> None:
+        usage = quota.AntigravityUsage(window(42, WEEK), NOW, window(30, WEEK))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / quota.ANTIGRAVITY_CACHE_FILENAME
+            quota.save_antigravity_cache(path, usage)
+
+            loaded = quota.load_antigravity_cache(path)
+            self.assertEqual(loaded, usage)
+            self.assertEqual(loaded.third_party.remaining_percent, 30)
+            self.assertEqual(
+                set(json.loads(path.read_text())),
+                {"gemini", "third_party", "fetched_at"},
+            )
+
+    def test_antigravity_cache_round_trip_third_party_only(self) -> None:
+        usage = quota.AntigravityUsage(None, NOW, window(30, WEEK))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / quota.ANTIGRAVITY_CACHE_FILENAME
+            quota.save_antigravity_cache(path, usage)
+
+            loaded = quota.load_antigravity_cache(path)
+            self.assertEqual(loaded, usage)
+            self.assertIsNone(loaded.gemini)
+            self.assertEqual(loaded.third_party.remaining_percent, 30)
+            self.assertEqual(
+                set(json.loads(path.read_text())), {"third_party", "fetched_at"}
+            )
+
+    def test_antigravity_cache_rejects_invalid_third_party(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / quota.ANTIGRAVITY_CACHE_FILENAME
+            path.write_text(
+                json.dumps(
+                    {
+                        "gemini": {
+                            "used_percent": 14,
+                            "remaining_percent": 86,
+                            "resets_at": NOW + WEEK,
+                            "window_seconds": WEEK,
+                        },
+                        "third_party": {
+                            "used_percent": 150,
+                            "remaining_percent": -50,
+                            "resets_at": NOW + WEEK,
+                            "window_seconds": WEEK,
+                        },
+                        "fetched_at": NOW,
+                    }
+                )
+            )
+
+            self.assertIsNone(quota.load_antigravity_cache(path))
+
+    def test_antigravity_cache_with_neither_window_yields_none(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / quota.ANTIGRAVITY_CACHE_FILENAME
+            path.write_text(json.dumps({"fetched_at": NOW}))
+
+            self.assertIsNone(quota.load_antigravity_cache(path))
 
     def test_route_picks_agy_when_it_is_the_only_healthy_lane(self) -> None:
         spec = medium_spec()

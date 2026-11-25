@@ -315,6 +315,134 @@ class TightestGeminiTests(unittest.TestCase):
         self.assertIsNone(self._tightest({}))
 
 
+class TightestThirdPartyTests(unittest.TestCase):
+    NOW = 1_795_341_005
+
+    def _tightest(self, quota: dict) -> dict | None:
+        return collector.tightest_third_party_window(
+            collector.parse_quota_document({"quota": quota}, self.NOW)
+        )
+
+    def test_picks_the_smallest_remaining_third_party_bucket(self) -> None:
+        window = self._tightest(
+            {
+                "3p-5h": _bucket(0.30),
+                "3p-weekly": _bucket(0.75, reset_in_secs=514_800),
+            }
+        )
+
+        self.assertIsNotNone(window)
+        self.assertEqual(window["used_percent"], 70)
+        self.assertEqual(window["remaining_percent"], 30)
+        self.assertEqual(window["window_seconds"], collector.FIVE_HOUR_WINDOW_SECONDS)
+
+    def test_breaks_ties_toward_the_longer_window(self) -> None:
+        window = self._tightest(
+            {
+                "3p-5h": _bucket(0.5),
+                "3p-weekly": _bucket(0.5, reset_in_secs=514_800),
+            }
+        )
+
+        self.assertEqual(window["window_seconds"], collector.WEEKLY_WINDOW_SECONDS)
+
+    def test_considers_any_3p_or_claude_prefixed_bucket(self) -> None:
+        window = self._tightest(
+            {
+                "3p-5h": _bucket(0.9),
+                "claude-weekly": _bucket(0.2, reset_in_secs=514_800),
+            }
+        )
+
+        self.assertEqual(window["used_percent"], 80)
+        self.assertEqual(window["remaining_percent"], 20)
+        self.assertEqual(window["window_seconds"], collector.WEEKLY_WINDOW_SECONDS)
+
+    def test_ignores_gemini_buckets(self) -> None:
+        window = self._tightest(
+            {
+                "gemini-5h": _bucket(0.01),
+                "gemini-weekly": _bucket(0.01, reset_in_secs=514_800),
+                "3p-weekly": _bucket(0.6, reset_in_secs=514_800),
+            }
+        )
+
+        self.assertEqual(window["used_percent"], 40)
+        self.assertEqual(window["remaining_percent"], 60)
+
+    def test_no_third_party_bucket_yields_none(self) -> None:
+        self.assertIsNone(self._tightest({"gemini-weekly": _bucket(0.5)}))
+        self.assertIsNone(self._tightest({}))
+
+
+class SaveCacheTests(unittest.TestCase):
+    NOW = 1_795_341_005
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = Path(self._tmp.name) / "antigravity-quota.json"
+
+    @staticmethod
+    def _window(used: int, remaining: int, window_seconds: int) -> dict:
+        return {
+            "remaining_fraction": remaining / 100,
+            "used_percent": used,
+            "remaining_percent": remaining,
+            "resets_at": 1_795_392_484,
+            "window_seconds": window_seconds,
+        }
+
+    def test_legacy_three_arguments_write_gemini_only(self) -> None:
+        gemini = self._window(14, 86, 604_800)
+
+        collector.save_cache(self.path, self.NOW, gemini)
+
+        cached = json.loads(self.path.read_text())
+        self.assertEqual(set(cached), {"gemini", "fetched_at"})
+        self.assertEqual(
+            set(cached["gemini"]),
+            {"used_percent", "remaining_percent", "resets_at", "window_seconds"},
+        )
+        self.assertEqual(cached["gemini"]["used_percent"], 14)
+        self.assertEqual(cached["gemini"]["remaining_percent"], 86)
+        self.assertEqual(cached["gemini"]["window_seconds"], 604_800)
+        self.assertEqual(cached["fetched_at"], self.NOW)
+        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
+
+    def test_writes_both_gemini_and_third_party(self) -> None:
+        gemini = self._window(14, 86, 604_800)
+        third_party = self._window(22, 78, 18_000)
+
+        collector.save_cache(self.path, self.NOW, gemini, third_party=third_party)
+
+        cached = json.loads(self.path.read_text())
+        self.assertEqual(set(cached), {"gemini", "third_party", "fetched_at"})
+        for key in ("gemini", "third_party"):
+            self.assertEqual(
+                set(cached[key]),
+                {"used_percent", "remaining_percent", "resets_at", "window_seconds"},
+            )
+        self.assertEqual(cached["third_party"]["used_percent"], 22)
+        self.assertEqual(cached["third_party"]["remaining_percent"], 78)
+        self.assertEqual(cached["third_party"]["window_seconds"], 18_000)
+        self.assertEqual(cached["third_party"]["resets_at"], 1_795_392_484)
+        self.assertEqual(cached["fetched_at"], self.NOW)
+        leftovers = [
+            p.name for p in self.path.parent.iterdir() if p.name != self.path.name
+        ]
+        self.assertEqual(leftovers, [])
+
+    def test_third_party_only_omits_the_gemini_key(self) -> None:
+        third_party = self._window(22, 78, 604_800)
+
+        collector.save_cache(self.path, self.NOW, None, third_party=third_party)
+
+        cached = json.loads(self.path.read_text())
+        self.assertEqual(set(cached), {"third_party", "fetched_at"})
+        self.assertEqual(cached["third_party"]["remaining_percent"], 78)
+
+
 class CollectorMainTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -351,7 +479,7 @@ class CollectorMainTests(unittest.TestCase):
         mode = stat.S_IMODE(self.cache.stat().st_mode)
         self.assertEqual(mode, 0o600)
         cached = json.loads(self.cache.read_text())
-        self.assertEqual(set(cached), {"gemini", "fetched_at"})
+        self.assertEqual(set(cached), {"gemini", "third_party", "fetched_at"})
         self.assertEqual(
             set(cached["gemini"]),
             {"used_percent", "remaining_percent", "resets_at", "window_seconds"},
@@ -360,6 +488,16 @@ class CollectorMainTests(unittest.TestCase):
         self.assertEqual(cached["gemini"]["remaining_percent"], 86)
         self.assertEqual(cached["gemini"]["window_seconds"], 604_800)
         self.assertEqual(cached["gemini"]["resets_at"], cached["fetched_at"] + 514_800)
+        self.assertEqual(
+            set(cached["third_party"]),
+            {"used_percent", "remaining_percent", "resets_at", "window_seconds"},
+        )
+        self.assertEqual(cached["third_party"]["used_percent"], 22)
+        self.assertEqual(cached["third_party"]["remaining_percent"], 78)
+        self.assertEqual(cached["third_party"]["window_seconds"], 604_800)
+        self.assertEqual(
+            cached["third_party"]["resets_at"], cached["fetched_at"] + 514_800
+        )
         leftovers = [p.name for p in self.state.iterdir() if p.name != self.cache.name]
         self.assertEqual(leftovers, [])
 
@@ -379,7 +517,58 @@ class CollectorMainTests(unittest.TestCase):
         self.assertEqual(
             usage.gemini.window_seconds, cached["gemini"]["window_seconds"]
         )
+        self.assertIsNotNone(usage.third_party)
+        self.assertEqual(
+            usage.third_party.used_percent, cached["third_party"]["used_percent"]
+        )
+        self.assertEqual(
+            usage.third_party.remaining_percent,
+            cached["third_party"]["remaining_percent"],
+        )
+        self.assertEqual(
+            usage.third_party.resets_at, cached["third_party"]["resets_at"]
+        )
+        self.assertEqual(
+            usage.third_party.window_seconds,
+            cached["third_party"]["window_seconds"],
+        )
         self.assertEqual(usage.fetched_at, cached["fetched_at"])
+
+    def test_persists_both_pools_when_the_payload_reports_both(self) -> None:
+        quota = {
+            "gemini-5h": _bucket(0.99),
+            "gemini-weekly": _bucket(0.86, reset_in_secs=514_800),
+            "3p-5h": _bucket(0.55),
+            "3p-weekly": _bucket(0.78, reset_in_secs=514_800),
+        }
+
+        rc, output, _ = self._run(json.dumps(_payload(quota)).encode())
+
+        self.assertEqual(rc, 0)
+        # Rendering is unchanged: a Gemini model summarises the 3p weekly pool.
+        self.assertIn("3p 22%", output)
+        cached = json.loads(self.cache.read_text())
+        self.assertEqual(set(cached), {"gemini", "third_party", "fetched_at"})
+        self.assertEqual(cached["gemini"]["remaining_percent"], 86)
+        self.assertEqual(cached["gemini"]["window_seconds"], 604_800)
+        # The tighter 3p five-hour bucket wins over the weekly one.
+        self.assertEqual(cached["third_party"]["used_percent"], 45)
+        self.assertEqual(cached["third_party"]["remaining_percent"], 55)
+        self.assertEqual(cached["third_party"]["window_seconds"], 18_000)
+        self.assertEqual(
+            cached["third_party"]["resets_at"], cached["fetched_at"] + 17_640
+        )
+
+    def test_persists_third_party_only_when_no_gemini_bucket_is_reported(self) -> None:
+        quota = {"3p-weekly": _bucket(0.78, reset_in_secs=514_800)}
+
+        rc, _, _ = self._run(json.dumps(_payload(quota)).encode())
+
+        self.assertEqual(rc, 0)
+        cached = json.loads(self.cache.read_text())
+        self.assertEqual(set(cached), {"third_party", "fetched_at"})
+        self.assertEqual(cached["third_party"]["remaining_percent"], 78)
+        self.assertEqual(cached["third_party"]["window_seconds"], 604_800)
 
     def test_never_persists_sensitive_input_fields(self) -> None:
         rc, _, _ = self._run(json.dumps(_payload(_live_quota())).encode())

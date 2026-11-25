@@ -4,7 +4,8 @@ This module is the sole credential boundary for Antigravity quota. It
 discovers a same-user Antigravity.app language_server (or a running ``agy``
 CLI) from process listings, reads the CSRF token from that process's argv
 when present, POSTs to the loopback Connect RPC, and prints only the
-normalized Gemini quota window as JSON.
+normalized quota windows as JSON: the tightest Gemini window, plus the
+tightest third-party (Claude/GPT) window when such a group is reported.
 
 The CSRF token never appears in argv constructed by this helper, logs,
 caches, stdout errors, exception messages, or files. This helper does not
@@ -69,6 +70,19 @@ def _is_gemini_group(display_name: object) -> bool:
     return isinstance(display_name, str) and "gemini" in display_name.lower()
 
 
+THIRD_PARTY_GROUP_MARKERS = ("claude", "gpt", "third", "3p", "opus", "sonnet")
+
+
+def _is_third_party_group(display_name: object) -> bool:
+    """True for the "Claude and GPT models" style group display name."""
+    if not isinstance(display_name, str) or not display_name:
+        return False
+    if _is_gemini_group(display_name):
+        return False
+    lowered = display_name.lower()
+    return any(marker in lowered for marker in THIRD_PARTY_GROUP_MARKERS)
+
+
 def _remaining_fraction(bucket: dict) -> float | None:
     remaining = bucket.get("remaining")
     if isinstance(remaining, dict):
@@ -107,8 +121,27 @@ def _parse_reset(value: object) -> str:
     return value
 
 
+def _tightest_window(candidates: list[tuple[float, int, str]]) -> dict:
+    """The smallest remaining fraction, longer window breaking a tie."""
+    fraction, window_seconds, reset = min(
+        candidates, key=lambda item: (item[0], -item[1])
+    )
+    remaining_percent = round(100 * fraction)
+    return {
+        "used_percent": 100 - remaining_percent,
+        "remaining_percent": remaining_percent,
+        "resets_at": reset,
+        "window_seconds": window_seconds,
+    }
+
+
 def parse_quota_summary(payload: dict) -> dict:
-    """Normalize RetrieveUserQuotaSummary to the tightest Gemini window."""
+    """Normalize RetrieveUserQuotaSummary to the tightest windows.
+
+    The Gemini window stays required; a third-party (Claude/GPT) group,
+    when the summary reports one, contributes an optional
+    ``"third_party"`` window chosen by the same tightest-bucket rule.
+    """
     if not isinstance(payload, dict):
         raise AntigravityUsageError("quota summary is not an object")
     response = payload.get("response")
@@ -118,11 +151,17 @@ def parse_quota_summary(payload: dict) -> dict:
     if not isinstance(groups, list):
         raise AntigravityUsageError("quota summary has no groups list")
 
-    candidates: list[tuple[float, int, str]] = []
+    gemini_candidates: list[tuple[float, int, str]] = []
+    third_party_candidates: list[tuple[float, int, str]] = []
     for group in groups:
-        if not isinstance(group, dict) or not _is_gemini_group(
-            group.get("displayName")
-        ):
+        if not isinstance(group, dict):
+            continue
+        display_name = group.get("displayName")
+        if _is_gemini_group(display_name):
+            candidates = gemini_candidates
+        elif _is_third_party_group(display_name):
+            candidates = third_party_candidates
+        else:
             continue
         buckets = group.get("buckets")
         if not isinstance(buckets, list):
@@ -133,23 +172,23 @@ def parse_quota_summary(payload: dict) -> dict:
             fraction = _remaining_fraction(bucket)
             if fraction is None:
                 continue
-            reset = _parse_reset(bucket.get("resetTime"))
+            if candidates is third_party_candidates:
+                # An unreadable third-party reset must not cost the required
+                # Gemini window; such a bucket is simply not valid.
+                try:
+                    reset = _parse_reset(bucket.get("resetTime"))
+                except AntigravityUsageError:
+                    continue
+            else:
+                reset = _parse_reset(bucket.get("resetTime"))
             candidates.append((fraction, _window_seconds(bucket), reset))
-    if not candidates:
+    if not gemini_candidates:
         raise AntigravityUsageError("quota summary has no Gemini remaining fraction")
 
-    fraction, window_seconds, reset = min(
-        candidates, key=lambda item: (item[0], -item[1])
-    )
-    remaining_percent = round(100 * fraction)
-    return {
-        "gemini": {
-            "used_percent": 100 - remaining_percent,
-            "remaining_percent": remaining_percent,
-            "resets_at": reset,
-            "window_seconds": window_seconds,
-        }
-    }
+    windows = {"gemini": _tightest_window(gemini_candidates)}
+    if third_party_candidates:
+        windows["third_party"] = _tightest_window(third_party_candidates)
+    return windows
 
 
 def _parse_csrf(command: str) -> str | None:
@@ -369,7 +408,7 @@ def fetch_from_local(
 
 
 def main() -> int:
-    """Print the normalized Gemini window, or a credential-free error."""
+    """Print the normalized windows, or a credential-free error."""
     try:
         window = fetch_from_local()
     except AntigravityUsageError as exc:
