@@ -846,7 +846,7 @@ class RenderSegmentsTests(unittest.TestCase):
 
     def test_no_color_environment_variable_disables_colour(self) -> None:
         document = self._document(
-            context_window={"current_usage": {"input_tokens": 250_000}}
+            context_window={"current_usage": {"input_tokens": 360_000}}
         )
         with mock.patch.dict(os.environ, {"NO_COLOR": "1"}):
             plain = self._render(document, color=None)
@@ -856,7 +856,7 @@ class RenderSegmentsTests(unittest.TestCase):
         with mock.patch.dict(os.environ, environment, clear=True):
             coloured = self._render(document, color=None)
         self.assertNotIn("\033", plain)
-        self.assertIn(f"{collector.ANSI_WARN}ctx 250K", coloured)
+        self.assertIn(f"{collector.ANSI_WARN}ctx 360K", coloured)
 
     def test_costly_effort_is_flagged_and_never_shed(self) -> None:
         warn, reset = collector.ANSI_WARN, collector.ANSI_RESET
@@ -929,17 +929,27 @@ class RenderSegmentsTests(unittest.TestCase):
             collector.ANSI_HIGH,
             collector.ANSI_RESET,
         )
-        cases = {
-            199_999: None,
-            200_000: warn,
-            299_999: warn,
-            300_000: high,
+        gemini = {"id": "gemini-4-neon", "display_name": "Gemini 4 Neon (XHigh)"}
+        third_party = {
+            "id": "claude-opus-5-5",
+            "display_name": "Claude Opus 5.5 (High)",
         }
-        for tokens, level in cases.items():
-            with self.subTest(tokens=tokens):
+        cases = [
+            (gemini, 349_999, None),
+            (gemini, 350_000, warn),
+            (gemini, 399_999, warn),
+            (gemini, 400_000, high),
+            (third_party, 199_999, None),
+            (third_party, 200_000, warn),
+            (third_party, 299_999, warn),
+            (third_party, 300_000, high),
+        ]
+        for model, tokens, level in cases:
+            with self.subTest(model=model["id"], tokens=tokens):
                 line = self._render(
                     self._document(
-                        context_window={"current_usage": {"input_tokens": tokens}}
+                        model=model,
+                        context_window={"current_usage": {"input_tokens": tokens}},
                     ),
                     color=True,
                 )
@@ -1019,13 +1029,13 @@ class RenderSegmentsTests(unittest.TestCase):
 
     def test_colour_codes_do_not_count_towards_the_width(self) -> None:
         document = self._document(
-            context_window={"current_usage": {"input_tokens": 212_000}}
+            context_window={"current_usage": {"input_tokens": 360_000}}
         )
         plain = self._render(document, columns=80)
         coloured = self._render(document, columns=80, color=True)
         self.assertEqual(
             plain,
-            "Neon 4 xhigh | ctx 212K | 5h 1% (4h54m) | 7d 14% (5d23h)"
+            "Neon 4 xhigh | ctx 360K | 5h 1% (4h54m) | 7d 14% (5d23h)"
             " | 3p 22% | 2t 2sub",
         )
         self.assertEqual(

@@ -74,9 +74,12 @@ MAX_RESET_AHEAD_SECS = 365 * 24 * 60 * 60
 RESET_SKEW_SECS = 60
 # Context depth is coloured against absolute token counts, because the cost
 # of a deep session follows tokens re-read per call, not the share of the
-# window.
+# window. Gemini sessions compact silently near 512K and carry a 400K
+# hypoxia nudge, while third-party Claude/GPT pools warn at 200K/300K.
 CONTEXT_WARN_TOKENS = 200_000
 CONTEXT_HIGH_TOKENS = 300_000
+GEMINI_CONTEXT_WARN_TOKENS = 350_000
+GEMINI_CONTEXT_HIGH_TOKENS = 400_000
 QUOTA_WARN_PERCENT = 70
 QUOTA_HIGH_PERCENT = 90
 # Efforts that drain a subscription quickly enough to deserve a visible
@@ -540,9 +543,14 @@ def render_status_line(
     if third_party:
         five_id, weekly_id = THIRD_PARTY_FIVE_HOUR_ID, THIRD_PARTY_WEEKLY_ID
         five_label, weekly_label = "3p5h", "3p7d"
+        context_warn, context_high = CONTEXT_WARN_TOKENS, CONTEXT_HIGH_TOKENS
     else:
         five_id, weekly_id = GEMINI_FIVE_HOUR_ID, GEMINI_WEEKLY_ID
         five_label, weekly_label = "5h", "7d"
+        context_warn, context_high = (
+            GEMINI_CONTEXT_WARN_TOKENS,
+            GEMINI_CONTEXT_HIGH_TOKENS,
+        )
     five_window = windows.get(five_id)
     weekly_window = windows.get(weekly_id)
     costly_effort = effort in COSTLY_EFFORT_LEVELS
@@ -559,7 +567,7 @@ def render_status_line(
             segments.append(
                 (
                     f"{label}{_context_amount(tokens)}",
-                    _level(tokens, CONTEXT_WARN_TOKENS, CONTEXT_HIGH_TOKENS),
+                    _level(tokens, context_warn, context_high),
                 )
             )
         segments.append(
