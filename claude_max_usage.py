@@ -40,6 +40,7 @@ SCOPED_REFRESH_SECS = 15 * 60
 STATUSLINE_PLUGIN_ID_PATH = "herdr/plugins/terry.herdr-model-lanes"
 STATUSLINE_CACHE_FILENAME = "claude-statusline.json"
 STATUSLINE_CACHE_MAX_AGE_SECS = 30 * 60
+STATUSLINE_FALLBACK_MAX_AGE_SECS = 6 * 60 * 60
 STATUSLINE_CACHE_MAX_BYTES = 64 * 1024
 MAX_RESET_AHEAD_SECS = 365 * 24 * 60 * 60
 
@@ -372,12 +373,8 @@ def _already_profile_scoped(base_dir: str) -> bool:
     ) == "profiles" or os.path.basename(norm_base).startswith("profile-")
 
 
-def statusline_cache_path(config_dir: str | os.PathLike[str] | None = None) -> str:
-    """Resolve the status-line cache path with the same precedence as ``ag``.
-
-    A non-default ``CLAUDE_CONFIG_DIR`` keys the cache under ``profiles/``
-    so concurrent profiles never read or overwrite each other's cache.
-    """
+def _base_state_dir() -> str:
+    """Resolve the base plugin state directory with ``ag`` precedence."""
     base_dir = os.environ.get("HERDR_PLUGIN_STATE_DIR") or os.environ.get(
         "MODEL_LANES_STATE_DIR"
     )
@@ -386,11 +383,26 @@ def statusline_cache_path(config_dir: str | os.PathLike[str] | None = None) -> s
             os.path.expanduser("~"), ".local", "state"
         )
         base_dir = os.path.join(xdg, STATUSLINE_PLUGIN_ID_PATH)
+    return base_dir
+
+
+def statusline_cache_path(config_dir: str | os.PathLike[str] | None = None) -> str:
+    """Resolve the status-line cache path with the same precedence as ``ag``.
+
+    A non-default ``CLAUDE_CONFIG_DIR`` keys the cache under ``profiles/``
+    so concurrent profiles never read or overwrite each other's cache.
+    """
+    base_dir = _base_state_dir()
     if not _already_profile_scoped(base_dir):
         sub = _profile_subdir(config_dir)
         if sub is not None:
             base_dir = os.path.join(base_dir, sub)
     return os.path.join(base_dir, STATUSLINE_CACHE_FILENAME)
+
+
+def root_statusline_cache_path() -> str:
+    """The un-scoped cache path; the global Herdr sidebar reads this one."""
+    return os.path.join(_base_state_dir(), STATUSLINE_CACHE_FILENAME)
 
 
 def _read_cache_file(path: str) -> bytes | None:
@@ -488,6 +500,131 @@ def load_statusline_usage(now: int | None = None) -> dict | None:
     }
 
 
+def load_stale_statusline_usage(now: int | None = None) -> dict | None:
+    """Return an older cached snapshot honestly marked stale, or None.
+
+    The fallback accepts the same bounded, symlink-refusing cache as
+    :func:`load_statusline_usage` but extends the age bound to
+    ``STATUSLINE_FALLBACK_MAX_AGE_SECS`` (6 hours, matching
+    ``herdr_model_lanes.py``'s ``CACHE_TTL_SECS``). A still-unexpired
+    ``seven_day`` window is preserved; an expired ``five_hour`` window is
+    dropped independently. The result carries ``stale`` and
+    ``stale_age_seconds`` so the consumer marks the lane stale.
+    """
+    if now is None:
+        now = int(time.time())
+    payload = _read_cache_file(statusline_cache_path())
+    if payload is None:
+        return None
+    try:
+        document = json.loads(payload.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    captured_at = document.get("captured_at")
+    if not _is_finite_number(captured_at) or captured_at <= 0:
+        return None
+    age = now - int(captured_at)
+    if age < -60 or age > STATUSLINE_FALLBACK_MAX_AGE_SECS:
+        return None
+    seven_day = _cache_window(document.get("seven_day"), now)
+    if seven_day is None:
+        return None
+    return {
+        "five_hour": _cache_window(document.get("five_hour"), now),
+        "seven_day": seven_day,
+        "stale": True,
+        "stale_age_seconds": max(0, age),
+    }
+
+
+def _statusline_window_doc(window: object, captured_at: int) -> dict | None:
+    """Validate one fetched window; return the cache shape or None.
+
+    ``window`` is a normalized :func:`fetch_usage` entry with an ISO-8601
+    ``resets_at`` string. The returned document stores the Unix epoch
+    integer instead, matching ``claude_statusline.py``'s cache schema.
+    Windows that are missing, malformed, already expired at
+    ``captured_at``, or reset implausibly far ahead are rejected.
+    """
+    if not isinstance(window, dict):
+        return None
+    utilization = window.get("utilization")
+    if not _is_finite_number(utilization) or not 0 <= utilization <= 100:
+        return None
+    resets_at = _iso_to_epoch(window.get("resets_at"))
+    if (
+        resets_at is None
+        or resets_at <= captured_at
+        or resets_at > captured_at + MAX_RESET_AHEAD_SECS
+    ):
+        return None
+    return {"utilization": utilization, "resets_at": resets_at}
+
+
+def save_statusline_usage(
+    windows: dict, captured_at: int, path: str | None = None
+) -> bool:
+    """Atomically persist the official windows to a status-line cache.
+
+    ``seven_day`` is required; a missing, invalid, or expired
+    ``five_hour`` window is stored as ``None`` so the five-hour slot can
+    reset without losing the weekly window. An existing cache with a
+    strictly newer ``captured_at`` is never regressed. Returns ``True``
+    only when the cache file was written.
+    """
+    if not isinstance(windows, dict):
+        return False
+    if path is None:
+        path = statusline_cache_path()
+    seven_day_doc = _statusline_window_doc(windows.get("seven_day"), captured_at)
+    if seven_day_doc is None:
+        return False
+    five_hour_doc = _statusline_window_doc(windows.get("five_hour"), captured_at)
+    existing = _read_cache_file(path)
+    if existing is not None:
+        try:
+            existing_document = json.loads(existing.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            existing_document = None
+        if isinstance(existing_document, dict):
+            existing_captured_at = existing_document.get("captured_at")
+            if (
+                _is_finite_number(existing_captured_at)
+                and existing_captured_at > captured_at
+            ):
+                return False
+    payload = json.dumps(
+        {
+            "captured_at": int(captured_at),
+            "five_hour": five_hour_doc,
+            "seven_day": seven_day_doc,
+        }
+    ).encode("utf-8")
+    if len(payload) > STATUSLINE_CACHE_MAX_BYTES:
+        return False
+    directory = os.path.dirname(path)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(
+        dir=directory, prefix=f".{os.path.basename(path)}.", suffix=".tmp"
+    )
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    except BaseException:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     """Print normalized quota windows, or a credential-free error.
 
@@ -495,7 +632,11 @@ def main(argv: list[str] | None = None) -> int:
     or network access; ``--refresh`` does not bypass a valid cache because
     the point is avoiding endpoint calls. ``--scoped`` is the one mode that
     always calls the endpoint: it records the model-scoped weekly limit
-    (the Fable cap) for the status line and prints only that window.
+    (the Fable cap) for the status line and prints only that window, while
+    also mirroring the official ``five_hour``/``seven_day`` windows into
+    the profile and root status-line caches. When the fresh cache misses
+    and the live fetch fails, an unexpired cache up to 6 hours old is
+    returned honestly marked ``stale`` instead of failing.
     """
     args = sys.argv[1:] if argv is None else list(argv)
     for arg in args:
@@ -512,6 +653,17 @@ def main(argv: list[str] | None = None) -> int:
         except (UsageHelperError, OSError) as exc:
             print(f"claude usage error: {exc}", file=sys.stderr)
             return 1
+        profile_path = statusline_cache_path()
+        try:
+            save_statusline_usage(windows, now, path=profile_path)
+        except OSError:
+            pass
+        root_path = root_statusline_cache_path()
+        if root_path != profile_path:
+            try:
+                save_statusline_usage(windows, now, path=root_path)
+            except OSError:
+                pass
         print(json.dumps(windows.get("weekly_scoped")))
         return 0
     try:
@@ -521,6 +673,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         windows = fetch_usage(read_oauth_token(), timeout=FETCH_TIMEOUT_SECS)
     except UsageHelperError as exc:
+        stale_cached = load_stale_statusline_usage()
+        if stale_cached is not None:
+            print(json.dumps(stale_cached))
+            return 0
         print(f"claude usage error: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(windows))

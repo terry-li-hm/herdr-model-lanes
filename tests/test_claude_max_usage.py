@@ -6,11 +6,13 @@ import tempfile
 import time
 import unittest
 import urllib.request
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 from urllib.error import URLError
 
 import claude_max_usage as helper
+import herdr_model_lanes as quota
 
 
 def setUpModule() -> None:
@@ -28,6 +30,37 @@ def setUpModule() -> None:
 
 NOW_MS = 1_700_000_000_000
 SYNTHETIC_TOKEN = "synthetic-oauth-token-for-tests"
+
+
+def _iso_timestamp(epoch: int) -> str:
+    """Render a Unix epoch as the ISO-8601 shape the endpoint returns."""
+    return datetime.fromtimestamp(epoch, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _filtered_env(**overrides: str | None) -> dict:
+    """Env without the state-dir/profile variables; a None value removes."""
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key
+        not in (
+            "HERDR_PLUGIN_STATE_DIR",
+            "MODEL_LANES_STATE_DIR",
+            "XDG_STATE_HOME",
+            "CLAUDE_CONFIG_DIR",
+        )
+    }
+    for key, value in overrides.items():
+        if value is None:
+            env.pop(key, None)
+        else:
+            env[key] = value
+    return env
+
+
+def _state_env(state_dir: str, **overrides: str | None) -> dict:
+    """Env for an isolated plugin state dir without profile leakage."""
+    return _filtered_env(HERDR_PLUGIN_STATE_DIR=state_dir, **overrides)
 
 
 class FakeResponse:
@@ -941,3 +974,691 @@ class ProfileScopedStatuslineTests(unittest.TestCase):
         payload = json.loads(out.getvalue())
         self.assertEqual(payload["seven_day"]["utilization"], 9)
         fetch.assert_called_once()
+
+
+class RootStatuslineCachePathTests(unittest.TestCase):
+    """The root mirror path ignores profile keying entirely."""
+
+    def _env(self, **overrides: str | None) -> dict:
+        return _filtered_env(**overrides)
+
+    def test_root_path_uses_state_dir_precedence_and_ignores_profiles(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            self._env(
+                HERDR_PLUGIN_STATE_DIR="/state/a",
+                CLAUDE_CONFIG_DIR="~/.claude-account6",
+            ),
+            clear=True,
+        ):
+            self.assertEqual(
+                helper.root_statusline_cache_path(),
+                "/state/a/claude-statusline.json",
+            )
+        with mock.patch.dict(
+            os.environ,
+            self._env(
+                HERDR_PLUGIN_STATE_DIR="/state/a",
+                MODEL_LANES_STATE_DIR="/state/b",
+                CLAUDE_CONFIG_DIR="~/.claude-account6",
+            ),
+            clear=True,
+        ):
+            self.assertEqual(
+                helper.root_statusline_cache_path(),
+                "/state/a/claude-statusline.json",
+            )
+        with mock.patch.dict(
+            os.environ,
+            self._env(MODEL_LANES_STATE_DIR="/state/b", XDG_STATE_HOME="/state/c"),
+            clear=True,
+        ):
+            self.assertEqual(
+                helper.root_statusline_cache_path(),
+                "/state/b/claude-statusline.json",
+            )
+
+    def test_root_path_matches_statusline_path_when_already_scoped(self) -> None:
+        for leaf in ("profiles/.claude-account6", "profile-123"):
+            with (
+                self.subTest(leaf=leaf),
+                mock.patch.dict(
+                    os.environ,
+                    self._env(
+                        HERDR_PLUGIN_STATE_DIR=os.path.join("/state/a", leaf),
+                        CLAUDE_CONFIG_DIR="~/.claude-account6",
+                    ),
+                ),
+            ):
+                self.assertEqual(
+                    helper.root_statusline_cache_path(),
+                    helper.statusline_cache_path(),
+                    os.path.join("/state/a", leaf, "claude-statusline.json"),
+                )
+
+    def test_root_path_falls_back_to_xdg_then_home(self) -> None:
+        with mock.patch.dict(
+            os.environ, self._env(XDG_STATE_HOME="/state/c"), clear=True
+        ):
+            self.assertEqual(
+                helper.root_statusline_cache_path(),
+                os.path.join(
+                    "/state/c",
+                    "herdr/plugins/terry.herdr-model-lanes",
+                    "claude-statusline.json",
+                ),
+            )
+        with mock.patch.dict(os.environ, self._env(), clear=True):
+            self.assertEqual(
+                helper.root_statusline_cache_path(),
+                os.path.join(
+                    os.path.expanduser("~"),
+                    ".local/state/herdr/plugins/terry.herdr-model-lanes",
+                    "claude-statusline.json",
+                ),
+            )
+
+
+class ScopedStatuslineMirrorTests(unittest.TestCase):
+    """--scoped must mirror the official windows into both caches."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.profile_config = os.path.join(os.path.expanduser("~"), ".claude-account6")
+        patcher = mock.patch.dict(
+            os.environ,
+            _state_env(self._tmp.name, CLAUDE_CONFIG_DIR=self.profile_config),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.root_path = os.path.join(self._tmp.name, "claude-statusline.json")
+        self.profile_path = os.path.join(
+            self._tmp.name, "profiles", ".claude-account6", "claude-statusline.json"
+        )
+
+    def _windows(self, now: int) -> dict:
+        return {
+            "five_hour": {
+                "utilization": 12.5,
+                "resets_at": _iso_timestamp(now + 3600),
+            },
+            "seven_day": {"utilization": 9, "resets_at": _iso_timestamp(now + 86400)},
+            "seven_day_sonnet": None,
+            "weekly_scoped": {
+                "scope": "Fable",
+                "utilization": 76.0,
+                "resets_at": 1789290000,
+            },
+        }
+
+    def _run_scoped(self, windows: dict) -> tuple[int, str]:
+        with (
+            mock.patch(
+                "claude_max_usage.read_oauth_token", return_value=SYNTHETIC_TOKEN
+            ),
+            mock.patch("claude_max_usage.fetch_usage", return_value=windows),
+            mock.patch("sys.stdout", new_callable=lambda: io.StringIO()) as out,
+        ):
+            rc = helper.main(["--scoped"])
+        return rc, out.getvalue()
+
+    def _statusline_files(self) -> list[str]:
+        return [
+            os.path.join(root, name)
+            for root, _dirs, files in os.walk(self._tmp.name)
+            for name in files
+            if name == helper.STATUSLINE_CACHE_FILENAME
+        ]
+
+    def test_scoped_persists_windows_to_profile_and_root_caches(self) -> None:
+        before = int(time.time())
+        windows = self._windows(before)
+        rc, stdout = self._run_scoped(windows)
+        after = int(time.time())
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(stdout.strip(), json.dumps(windows["weekly_scoped"]))
+        for path in (self.profile_path, self.root_path):
+            with self.subTest(path=path):
+                self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600, path)
+                with open(path, encoding="utf-8") as handle:
+                    document = json.load(handle)
+                self.assertEqual(
+                    set(document), {"captured_at", "five_hour", "seven_day"}
+                )
+                self.assertTrue(before <= document["captured_at"] <= after)
+                self.assertEqual(
+                    document["five_hour"],
+                    {"utilization": 12.5, "resets_at": before + 3600},
+                )
+                self.assertEqual(
+                    document["seven_day"],
+                    {"utilization": 9, "resets_at": before + 86400},
+                )
+        self.assertEqual(
+            sorted(self._statusline_files()),
+            sorted([self.profile_path, self.root_path]),
+        )
+        result = helper.load_statusline_usage(now=after)
+        self.assertEqual(result["five_hour"]["utilization"], 12.5)
+        self.assertEqual(result["seven_day"]["utilization"], 9)
+        with mock.patch.dict(
+            os.environ, {"CLAUDE_CONFIG_DIR": os.path.expanduser("~/.claude")}
+        ):
+            root_result = helper.load_statusline_usage(now=after)
+        self.assertEqual(root_result["seven_day"]["utilization"], 9)
+
+    def test_scoped_default_or_scoped_state_dir_writes_only_once(self) -> None:
+        real_save = helper.save_statusline_usage
+        windows = self._windows(int(time.time()))
+        expected_path = self.root_path
+        state_dir = self._tmp.name
+        with (
+            self.subTest(claude_config_dir="~/.claude"),
+            mock.patch.dict(
+                os.environ,
+                {"CLAUDE_CONFIG_DIR": os.path.expanduser("~/.claude")},
+            ),
+            mock.patch(
+                "claude_max_usage.save_statusline_usage", side_effect=real_save
+            ) as save,
+        ):
+            rc, stdout = self._run_scoped(windows)
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(stdout), windows["weekly_scoped"])
+        self.assertEqual(save.call_count, 1)
+        self.assertEqual(save.call_args.kwargs.get("path"), expected_path)
+        self.assertEqual(self._statusline_files(), [expected_path])
+        self.assertFalse(os.path.exists(os.path.join(state_dir, "profiles")))
+        os.unlink(expected_path)
+
+        already_scoped = os.path.join(state_dir, "profiles", ".claude-account6")
+        expected_path = os.path.join(already_scoped, "claude-statusline.json")
+        with (
+            self.subTest(state_dir="already profile-scoped"),
+            mock.patch.dict(os.environ, {"HERDR_PLUGIN_STATE_DIR": already_scoped}),
+            mock.patch(
+                "claude_max_usage.save_statusline_usage", side_effect=real_save
+            ) as save,
+        ):
+            rc, stdout = self._run_scoped(windows)
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(stdout), windows["weekly_scoped"])
+        self.assertEqual(save.call_count, 1)
+        self.assertEqual(save.call_args.kwargs.get("path"), expected_path)
+        self.assertEqual(self._statusline_files(), [expected_path])
+
+    def test_scoped_survives_statusline_write_oserror(self) -> None:
+        windows = self._windows(int(time.time()))
+        with (
+            mock.patch(
+                "claude_max_usage.read_oauth_token", return_value=SYNTHETIC_TOKEN
+            ),
+            mock.patch("claude_max_usage.fetch_usage", return_value=windows),
+            mock.patch(
+                "claude_max_usage.save_statusline_usage",
+                side_effect=OSError("status-line cache write failed"),
+            ),
+            mock.patch("sys.stdout", new_callable=lambda: io.StringIO()) as out,
+        ):
+            rc = helper.main(["--scoped"])
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.getvalue().strip(), json.dumps(windows["weekly_scoped"]))
+        self.assertEqual(self._statusline_files(), [])
+        self.assertTrue(
+            os.path.exists(helper.scoped_cache_path()),
+            "scoped-limit cache must still be written",
+        )
+
+    def test_scoped_root_write_failure_keeps_profile_mirror(self) -> None:
+        # A directory occupying the root cache path makes os.replace fail
+        # with a real OSError after the temp file is written.
+        os.makedirs(self.root_path)
+        windows = self._windows(int(time.time()))
+        rc, stdout = self._run_scoped(windows)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(stdout.strip(), json.dumps(windows["weekly_scoped"]))
+        self.assertTrue(os.path.isfile(self.profile_path))
+        self.assertTrue(os.path.isdir(self.root_path))
+        leftovers = [
+            name
+            for name in os.listdir(self._tmp.name)
+            if name.startswith(f".{helper.STATUSLINE_CACHE_FILENAME}.")
+        ]
+        self.assertEqual(leftovers, [])
+
+
+class SaveStatuslineUsageTests(unittest.TestCase):
+    """Unit tests for the atomic status-line cache writer."""
+
+    CAPTURED_AT = 1_789_000_000
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = os.path.join(self._tmp.name, "claude-statusline.json")
+
+    def _valid_windows(self) -> dict:
+        return {
+            "five_hour": {
+                "utilization": 12.5,
+                "resets_at": _iso_timestamp(self.CAPTURED_AT + 3600),
+            },
+            "seven_day": {
+                "utilization": 9,
+                "resets_at": _iso_timestamp(self.CAPTURED_AT + 86400),
+            },
+        }
+
+    def _read_document(self) -> dict:
+        with open(self.path, encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def test_round_trips_with_mode_0600_and_epoch_resets(self) -> None:
+        written = helper.save_statusline_usage(
+            self._valid_windows(), self.CAPTURED_AT, path=self.path
+        )
+
+        self.assertTrue(written)
+        self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode), 0o600)
+        self.assertEqual(
+            self._read_document(),
+            {
+                "captured_at": self.CAPTURED_AT,
+                "five_hour": {
+                    "utilization": 12.5,
+                    "resets_at": self.CAPTURED_AT + 3600,
+                },
+                "seven_day": {"utilization": 9, "resets_at": self.CAPTURED_AT + 86400},
+            },
+        )
+
+    def test_default_path_targets_the_statusline_cache_path(self) -> None:
+        with mock.patch.dict(os.environ, _state_env(self._tmp.name)):
+            written = helper.save_statusline_usage(
+                self._valid_windows(), self.CAPTURED_AT
+            )
+            self.assertEqual(
+                helper.statusline_cache_path(),
+                os.path.join(self._tmp.name, "claude-statusline.json"),
+            )
+
+        self.assertTrue(written)
+        self.assertTrue(os.path.isfile(self.path))
+
+    def test_monotonic_guard_refuses_regression_allows_equal_or_newer(self) -> None:
+        windows = self._valid_windows()
+        self.assertTrue(
+            helper.save_statusline_usage(windows, self.CAPTURED_AT, path=self.path)
+        )
+
+        self.assertFalse(
+            helper.save_statusline_usage(windows, self.CAPTURED_AT - 1, path=self.path)
+        )
+        self.assertEqual(self._read_document()["captured_at"], self.CAPTURED_AT)
+
+        self.assertTrue(
+            helper.save_statusline_usage(windows, self.CAPTURED_AT, path=self.path)
+        )
+        self.assertEqual(self._read_document()["captured_at"], self.CAPTURED_AT)
+
+        self.assertTrue(
+            helper.save_statusline_usage(windows, self.CAPTURED_AT + 60, path=self.path)
+        )
+        self.assertEqual(self._read_document()["captured_at"], self.CAPTURED_AT + 60)
+
+    def test_monotonic_guard_ignores_malformed_or_non_finite_caches(self) -> None:
+        windows = self._valid_windows()
+        for content in (
+            "{not json",
+            "[]",
+            '{"captured_at": "soon"}',
+            '{"captured_at": NaN}',
+            '{"captured_at": null}',
+        ):
+            with (
+                self.subTest(content=content),
+                open(self.path, "w", encoding="utf-8") as handle,
+            ):
+                handle.write(content)
+            self.assertTrue(
+                helper.save_statusline_usage(windows, self.CAPTURED_AT, path=self.path)
+            )
+            self.assertEqual(self._read_document()["captured_at"], self.CAPTURED_AT)
+
+    def test_monotonic_guard_honours_finite_float_newer_timestamp(self) -> None:
+        windows = self._valid_windows()
+        self.assertTrue(
+            helper.save_statusline_usage(windows, self.CAPTURED_AT, path=self.path)
+        )
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps({"captured_at": self.CAPTURED_AT + 0.5}))
+
+        self.assertFalse(
+            helper.save_statusline_usage(windows, self.CAPTURED_AT, path=self.path)
+        )
+        self.assertEqual(self._read_document()["captured_at"], self.CAPTURED_AT + 0.5)
+
+    def test_drops_expired_or_invalid_five_hour_but_saves_seven_day(self) -> None:
+        far_ahead = self.CAPTURED_AT + helper.MAX_RESET_AHEAD_SECS + 3600
+        invalid_five_hour = (
+            None,
+            "not-a-window",
+            {},
+            {"utilization": 5},
+            {"resets_at": _iso_timestamp(self.CAPTURED_AT + 600)},
+            {"utilization": 5, "resets_at": 12345},
+            {"utilization": 5, "resets_at": "not-a-timestamp"},
+            {"utilization": 5, "resets_at": _iso_timestamp(self.CAPTURED_AT - 1)},
+            {"utilization": 5, "resets_at": _iso_timestamp(self.CAPTURED_AT)},
+            {"utilization": 5, "resets_at": _iso_timestamp(far_ahead)},
+            {"utilization": 200, "resets_at": _iso_timestamp(self.CAPTURED_AT + 600)},
+            {"utilization": -1, "resets_at": _iso_timestamp(self.CAPTURED_AT + 600)},
+            {"utilization": True, "resets_at": _iso_timestamp(self.CAPTURED_AT + 600)},
+            {
+                "utilization": float("nan"),
+                "resets_at": _iso_timestamp(self.CAPTURED_AT + 600),
+            },
+            {
+                "utilization": float("inf"),
+                "resets_at": _iso_timestamp(self.CAPTURED_AT + 600),
+            },
+        )
+        for five_hour in invalid_five_hour:
+            with self.subTest(five_hour=five_hour):
+                windows = {
+                    "five_hour": five_hour,
+                    "seven_day": {
+                        "utilization": 9,
+                        "resets_at": _iso_timestamp(self.CAPTURED_AT + 86400),
+                    },
+                }
+                self.assertTrue(
+                    helper.save_statusline_usage(
+                        windows, self.CAPTURED_AT, path=self.path
+                    )
+                )
+                document = self._read_document()
+                self.assertIsNone(document["five_hour"])
+                self.assertEqual(
+                    document["seven_day"],
+                    {"utilization": 9, "resets_at": self.CAPTURED_AT + 86400},
+                )
+                os.unlink(self.path)
+
+        windows = {
+            "seven_day": {
+                "utilization": 9,
+                "resets_at": _iso_timestamp(self.CAPTURED_AT + 86400),
+            }
+        }
+        self.assertTrue(
+            helper.save_statusline_usage(windows, self.CAPTURED_AT, path=self.path)
+        )
+        self.assertIsNone(self._read_document()["five_hour"])
+
+    def test_skips_write_when_seven_day_missing_expired_or_invalid(self) -> None:
+        far_ahead = self.CAPTURED_AT + helper.MAX_RESET_AHEAD_SECS + 3600
+        invalid_seven_day = (
+            None,
+            "not-a-window",
+            {},
+            {"utilization": 9},
+            {"resets_at": _iso_timestamp(self.CAPTURED_AT + 86400)},
+            {"utilization": 9, "resets_at": 12345},
+            {"utilization": 9, "resets_at": "not-a-timestamp"},
+            {"utilization": 9, "resets_at": _iso_timestamp(self.CAPTURED_AT - 1)},
+            {"utilization": 9, "resets_at": _iso_timestamp(self.CAPTURED_AT)},
+            {"utilization": 9, "resets_at": _iso_timestamp(far_ahead)},
+            {"utilization": 200, "resets_at": _iso_timestamp(self.CAPTURED_AT + 86400)},
+            {"utilization": -1, "resets_at": _iso_timestamp(self.CAPTURED_AT + 86400)},
+            {
+                "utilization": True,
+                "resets_at": _iso_timestamp(self.CAPTURED_AT + 86400),
+            },
+            {
+                "utilization": float("nan"),
+                "resets_at": _iso_timestamp(self.CAPTURED_AT + 86400),
+            },
+            {
+                "utilization": float("inf"),
+                "resets_at": _iso_timestamp(self.CAPTURED_AT + 86400),
+            },
+        )
+        five_hour = {
+            "utilization": 12.5,
+            "resets_at": _iso_timestamp(self.CAPTURED_AT + 3600),
+        }
+        for seven_day in invalid_seven_day:
+            with self.subTest(seven_day=seven_day):
+                self.assertFalse(
+                    helper.save_statusline_usage(
+                        {"five_hour": five_hour, "seven_day": seven_day},
+                        self.CAPTURED_AT,
+                        path=self.path,
+                    )
+                )
+                self.assertFalse(os.path.exists(self.path))
+
+        self.assertFalse(
+            helper.save_statusline_usage(
+                {"five_hour": five_hour}, self.CAPTURED_AT, path=self.path
+            )
+        )
+        self.assertFalse(
+            helper.save_statusline_usage(
+                "not-a-window", self.CAPTURED_AT, path=self.path
+            )
+        )
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_reset_horizon_is_inclusive_at_the_far_edge(self) -> None:
+        edge = self.CAPTURED_AT + helper.MAX_RESET_AHEAD_SECS
+        windows = {
+            "five_hour": {
+                "utilization": 12.5,
+                "resets_at": _iso_timestamp(self.CAPTURED_AT + 3600),
+            },
+            "seven_day": {"utilization": 9, "resets_at": _iso_timestamp(edge)},
+        }
+        self.assertTrue(
+            helper.save_statusline_usage(windows, self.CAPTURED_AT, path=self.path)
+        )
+        self.assertEqual(self._read_document()["seven_day"]["resets_at"], edge)
+
+        windows["seven_day"]["resets_at"] = _iso_timestamp(edge + 1)
+        self.assertFalse(
+            helper.save_statusline_usage(windows, self.CAPTURED_AT, path=self.path)
+        )
+        self.assertEqual(self._read_document()["seven_day"]["resets_at"], edge)
+
+    def test_failed_write_cleans_up_temp_file_and_raises(self) -> None:
+        os.makedirs(self.path)
+        with self.assertRaises(OSError):
+            helper.save_statusline_usage(
+                self._valid_windows(), self.CAPTURED_AT, path=self.path
+            )
+        self.assertEqual(os.listdir(self._tmp.name), ["claude-statusline.json"])
+
+
+class StaleStatuslineFallbackTests(unittest.TestCase):
+    """Bounded 6-hour stale fallback for the default usage path."""
+
+    def setUp(self) -> None:
+        self.NOW = int(time.time())
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        patcher = mock.patch.dict(os.environ, _state_env(self._tmp.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.path = os.path.join(self._tmp.name, "claude-statusline.json")
+
+    def _write_cache(
+        self, captured_at: int, five_hour: object, seven_day: object
+    ) -> None:
+        with open(self.path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "captured_at": captured_at,
+                    "five_hour": five_hour,
+                    "seven_day": seven_day,
+                },
+                handle,
+            )
+
+    def _live_five_hour(self) -> dict:
+        return {"utilization": 42, "resets_at": self.NOW + 1800}
+
+    def _live_seven_day(self) -> dict:
+        return {"utilization": 80, "resets_at": self.NOW + 86400}
+
+    def test_stale_cache_within_six_hours_is_returned_marked_stale(self) -> None:
+        self._write_cache(
+            self.NOW - 45 * 60,
+            {"utilization": 42, "resets_at": self.NOW - 1},
+            self._live_seven_day(),
+        )
+        result = helper.load_stale_statusline_usage(now=self.NOW)
+        self.assertEqual(
+            result,
+            {
+                "five_hour": None,
+                "seven_day": {
+                    "utilization": 80,
+                    "resets_at": _iso_timestamp(self.NOW + 86400),
+                },
+                "stale": True,
+                "stale_age_seconds": 45 * 60,
+            },
+        )
+
+        self._write_cache(
+            self.NOW - 6 * 3600, self._live_five_hour(), self._live_seven_day()
+        )
+        result = helper.load_stale_statusline_usage(now=self.NOW)
+        self.assertEqual(result["stale"], True)
+        self.assertEqual(result["stale_age_seconds"], 6 * 3600)
+        self.assertEqual(result["five_hour"]["utilization"], 42)
+
+        self._write_cache(self.NOW + 30, self._live_five_hour(), self._live_seven_day())
+        result = helper.load_stale_statusline_usage(now=self.NOW)
+        self.assertEqual(result["stale"], True)
+        self.assertEqual(result["stale_age_seconds"], 0)
+
+    def test_stale_loader_rejects_too_old_or_invalid_caches(self) -> None:
+        cases = (
+            ("just past six hours", self.NOW - 6 * 3600 - 1),
+            ("far in the future", self.NOW + 120),
+        )
+        for label, captured_at in cases:
+            with (
+                self.subTest(label=label),
+            ):
+                self._write_cache(
+                    captured_at, self._live_five_hour(), self._live_seven_day()
+                )
+                self.assertIsNone(helper.load_stale_statusline_usage(now=self.NOW))
+
+        for label, seven_day in (
+            ("seven_day expired", {"utilization": 80, "resets_at": self.NOW - 1}),
+            ("seven_day invalid", {"utilization": 200, "resets_at": self.NOW + 1}),
+            ("seven_day missing", None),
+        ):
+            with self.subTest(label=label):
+                self._write_cache(self.NOW - 45 * 60, None, seven_day)
+                self.assertIsNone(helper.load_stale_statusline_usage(now=self.NOW))
+
+        os.unlink(self.path)
+        self.assertIsNone(helper.load_stale_statusline_usage(now=self.NOW))
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write("{not json")
+        self.assertIsNone(helper.load_stale_statusline_usage(now=self.NOW))
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write("[]")
+        self.assertIsNone(helper.load_stale_statusline_usage(now=self.NOW))
+
+    def test_main_returns_stale_cache_when_live_fetch_fails(self) -> None:
+        self._write_cache(
+            int(time.time()) - 45 * 60,
+            {"utilization": 42, "resets_at": self.NOW - 1},
+            self._live_seven_day(),
+        )
+        with (
+            mock.patch(
+                "claude_max_usage.read_oauth_token",
+                side_effect=helper.UsageHelperError(
+                    "cannot open credentials file: FileNotFoundError"
+                ),
+            ),
+            mock.patch(
+                "claude_max_usage.fetch_usage",
+                side_effect=AssertionError("network access must not happen"),
+            ),
+            mock.patch("sys.stdout", new_callable=lambda: io.StringIO()) as out,
+            mock.patch("sys.stderr", new_callable=lambda: io.StringIO()) as err,
+        ):
+            rc = helper.main([])
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(err.getvalue(), "")
+        payload = json.loads(out.getvalue())
+        self.assertIs(payload["stale"], True)
+        self.assertTrue(45 * 60 <= payload["stale_age_seconds"] <= 45 * 60 + 5)
+        self.assertIsNone(payload["five_hour"])
+        self.assertEqual(payload["seven_day"]["utilization"], 80)
+
+        usage = quota.parse_claude_usage(payload, self.NOW)
+        self.assertTrue(usage.source_stale)
+        self.assertEqual(usage.fetched_at, self.NOW - payload["stale_age_seconds"])
+        self.assertEqual(usage.weekly.used_percent, 80)
+        self.assertEqual(usage.weekly.remaining_percent, 20)
+        self.assertEqual(usage.weekly.resets_at, self.NOW + 86400)
+        self.assertIsNone(usage.session)
+        self.assertIsNone(usage.sonnet)
+
+    def test_main_fails_cleanly_when_fallback_is_unavailable(self) -> None:
+        for label, setup in (
+            (
+                "cache older than six hours",
+                lambda: self._write_cache(
+                    int(time.time()) - 7 * 3600,
+                    self._live_five_hour(),
+                    self._live_seven_day(),
+                ),
+            ),
+            ("cache entirely missing", lambda: None),
+            (
+                "seven_day expired",
+                lambda: self._write_cache(
+                    int(time.time()) - 45 * 60,
+                    self._live_five_hour(),
+                    {"utilization": 80, "resets_at": self.NOW - 1},
+                ),
+            ),
+        ):
+            with self.subTest(label=label):
+                if os.path.exists(self.path):
+                    os.unlink(self.path)
+                setup()
+                with (
+                    mock.patch(
+                        "claude_max_usage.read_oauth_token",
+                        side_effect=helper.UsageHelperError(
+                            "Claude OAuth token has expired; sign in again"
+                        ),
+                    ),
+                    mock.patch(
+                        "claude_max_usage.fetch_usage",
+                        side_effect=AssertionError("network access must not happen"),
+                    ),
+                    mock.patch("sys.stdout", new_callable=lambda: io.StringIO()) as out,
+                    mock.patch("sys.stderr", new_callable=lambda: io.StringIO()) as err,
+                ):
+                    rc = helper.main([])
+                self.assertEqual(rc, 1)
+                self.assertIn("claude usage error:", err.getvalue())
+                self.assertNotIn(SYNTHETIC_TOKEN, err.getvalue())
+                self.assertEqual(out.getvalue(), "")
