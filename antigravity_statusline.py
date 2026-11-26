@@ -21,6 +21,21 @@ minute, so an idle session can neither overwrite a busier session's newer
 reading nor stamp an old one as fresh. A session whose transcript file does
 not exist yet (startup launch) still counts as writable.
 
+A non-idle session can still be stale: one started before a global quota
+reset reports the pre-reset windows, with earlier reset timestamps, until
+its next API response. Before overwriting, the collector therefore
+re-reads the existing cache (bounded to 64 KiB, and treated as absent
+when missing, unreadable, oversized or invalid) and, when that cache was
+written within the last half hour, judges the Gemini and third-party
+pools independently against its reset epochs — recorded additively under
+``bucket_resets``, and for legacy caches derived from the stored
+windows. A pool whose weekly or 5-hour reset epoch trails the fresh
+cache is a rollback: the write keeps the cached window and epochs for
+that pool, and is skipped outright when every reported pool regressed,
+so the shared cache never ping-pongs backwards. Forward resets and
+same-epoch consumption updates persist normally; the rendered status
+line is never affected by the guard.
+
 The rendered line reads, left to right: model and reasoning effort, context
 depth in tokens, the active pool's 5h and weekly windows, a one-number
 summary of the other pool, and active task/subagent counts. The active
@@ -68,11 +83,23 @@ THIRD_PARTY_FIVE_HOUR_ID = "3p-5h"
 THIRD_PARTY_WEEKLY_ID = "3p-weekly"
 FIVE_HOUR_WINDOW_SECONDS = 5 * 3600
 WEEKLY_WINDOW_SECONDS = 7 * 86400
+# The quota pools the rollback guard judges independently, each with the
+# bucket ids whose reset epochs it compares (weekly first, then 5-hour).
+POOL_RESET_KEYS = {
+    "gemini": (GEMINI_WEEKLY_ID, GEMINI_FIVE_HOUR_ID),
+    "third_party": (THIRD_PARTY_WEEKLY_ID, THIRD_PARTY_FIVE_HOUR_ID),
+}
 MAX_INPUT_BYTES = 1 << 20
 DOWNSTREAM_TIMEOUT_SECS = 1
 MAX_RESET_AHEAD_SECS = 365 * 24 * 60 * 60
 # A reset timestamp a little in the past is clock skew, not a stale window.
 RESET_SKEW_SECS = 60
+# A cache written within this window is defended against older sessions
+# that still hold pre-reset quota buckets in memory.
+STALE_GUARD_MAX_AGE_SECS = 30 * 60
+# The existing cache is re-read before every guarded write; anything
+# larger than this is treated as no cache at all.
+MAX_CACHE_BYTES = 65536
 # Context depth is coloured against absolute token counts, because the cost
 # of a deep session follows tokens re-read per call, not the share of the
 # window. Gemini sessions compact silently near 512K and carry a 400K
@@ -156,6 +183,27 @@ def _window_seconds_for(bucket_id: str) -> int:
     return WEEKLY_WINDOW_SECONDS
 
 
+def _pool_for_bucket(bucket_id: str) -> str | None:
+    """The quota pool a bucket id belongs to, or None for foreign buckets.
+
+    ``gemini-5h``/``gemini-weekly`` and any ``gemini*`` id read the Gemini
+    pool; ``3p-5h``/``3p-weekly`` and any ``3p*``/``claude*`` id read the
+    third-party pool. The tightest-window selection and the rollback
+    guard share this classification, so a bucket can never count for
+    one and not the other.
+    """
+    if bucket_id in (GEMINI_FIVE_HOUR_ID, GEMINI_WEEKLY_ID):
+        return "gemini"
+    if bucket_id in (THIRD_PARTY_FIVE_HOUR_ID, THIRD_PARTY_WEEKLY_ID):
+        return "third_party"
+    lowered = bucket_id.lower()
+    if lowered.startswith("gemini"):
+        return "gemini"
+    if lowered.startswith(("3p", "claude")):
+        return "third_party"
+    return None
+
+
 def _resets_at(bucket: dict, now: int) -> int | None:
     """Reset epoch from ``reset_time``, else ``now + reset_in_seconds``."""
     reset_time = bucket.get("reset_time")
@@ -231,8 +279,7 @@ def tightest_gemini_window(windows: dict[str, dict]) -> dict | None:
     candidates = [
         window
         for bucket_id, window in windows.items()
-        if bucket_id in (GEMINI_FIVE_HOUR_ID, GEMINI_WEEKLY_ID)
-        or bucket_id.lower().startswith("gemini")
+        if _pool_for_bucket(bucket_id) == "gemini"
     ]
     if not candidates:
         return None
@@ -253,8 +300,7 @@ def tightest_third_party_window(windows: dict[str, dict]) -> dict | None:
     candidates = [
         window
         for bucket_id, window in windows.items()
-        if bucket_id in (THIRD_PARTY_FIVE_HOUR_ID, THIRD_PARTY_WEEKLY_ID)
-        or bucket_id.lower().startswith(("3p", "claude"))
+        if _pool_for_bucket(bucket_id) == "third_party"
     ]
     if not candidates:
         return None
@@ -265,14 +311,22 @@ def tightest_third_party_window(windows: dict[str, dict]) -> dict | None:
 
 
 def save_cache(
-    path: Path, fetched_at: int, window: dict | None, third_party: dict | None = None
+    path: Path,
+    fetched_at: int,
+    window: dict | None,
+    third_party: dict | None = None,
+    *,
+    bucket_resets: dict[str, int] | None = None,
 ) -> None:
     """Atomically persist the normalized windows with mode 0600.
 
     The Gemini window keeps the exact ``"gemini"`` schema it always had,
     and a third-party window, when known, is stored beside it under
     ``"third_party"`` with the same four keys. Callers that pass only a
-    Gemini window keep writing the legacy two-key payload.
+    Gemini window keep writing the legacy two-key payload. A non-empty
+    ``bucket_resets`` map of bucket ids to reset epochs is stored
+    additively at top level so a later run can tell a pre-reset rollback
+    from a fresh reading; readers that do not know the key ignore it.
     """
     payload: dict[str, dict | int] = {}
     if window is not None:
@@ -290,6 +344,14 @@ def save_cache(
             "window_seconds": third_party["window_seconds"],
         }
     payload["fetched_at"] = fetched_at
+    if isinstance(bucket_resets, dict) and bucket_resets:
+        resets = {
+            bucket_id: int(epoch)
+            for bucket_id, epoch in bucket_resets.items()
+            if isinstance(bucket_id, str) and _is_finite_number(epoch)
+        }
+        if resets:
+            payload["bucket_resets"] = resets
     encoded = json.dumps(payload).encode("utf-8")
     directory = path.parent
     directory.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -309,6 +371,203 @@ def save_cache(
         except OSError:
             pass
         raise
+
+
+def _read_existing_cache(path: Path) -> dict | None:
+    """The existing cache payload, or None when absent or unusable.
+
+    The read is bounded to ``MAX_CACHE_BYTES``; a missing, unreadable,
+    oversized, non-object or invalid-JSON file counts as no cache, so a
+    fresh reading always wins over a broken one.
+    """
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read(MAX_CACHE_BYTES + 1)
+    except OSError:
+        return None
+    if len(data) > MAX_CACHE_BYTES:
+        return None
+    try:
+        existing = json.loads(data.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        return None
+    return existing if isinstance(existing, dict) else None
+
+
+def _cache_is_fresh(existing: dict, now: int) -> bool:
+    """True when the existing cache is recent enough to be defended."""
+    fetched_at = existing.get("fetched_at")
+    if not _is_finite_number(fetched_at):
+        return False
+    return now - STALE_GUARD_MAX_AGE_SECS <= fetched_at <= now + RESET_SKEW_SECS
+
+
+def _reset_bucket_for(pool: str, window_seconds: object) -> str | None:
+    """The canonical ``bucket_resets`` key for a pool and window length."""
+    if window_seconds == FIVE_HOUR_WINDOW_SECONDS:
+        return POOL_RESET_KEYS[pool][1]
+    if window_seconds == WEEKLY_WINDOW_SECONDS:
+        return POOL_RESET_KEYS[pool][0]
+    return None
+
+
+def _reset_epochs_from_windows(windows: dict[str, dict]) -> dict[str, int]:
+    """Reset epochs from the payload, keyed by canonical bucket id.
+
+    Every Gemini and third-party bucket contributes the epoch of its
+    window length; when several buckets share a length, the latest epoch
+    wins.
+    """
+    epochs: dict[str, int] = {}
+    for bucket_id, window in windows.items():
+        pool = _pool_for_bucket(bucket_id)
+        if pool is None:
+            continue
+        key = _reset_bucket_for(pool, window["window_seconds"])
+        if key is None:
+            continue
+        epoch = window["resets_at"]
+        if key not in epochs or epoch > epochs[key]:
+            epochs[key] = epoch
+    return epochs
+
+
+def _reset_epochs_from_cache(existing: dict) -> dict[str, int]:
+    """Reset epochs held by the existing cache, keyed by canonical bucket id.
+
+    Epochs come from ``bucket_resets`` when present, and from the stored
+    Gemini/third-party windows — their ``window_seconds`` and
+    ``resets_at`` — so a legacy cache file without the metadata still
+    guards. ``bucket_resets`` wins when both describe a window.
+    """
+    epochs: dict[str, int] = {}
+    resets = existing.get("bucket_resets")
+    if isinstance(resets, dict):
+        for bucket_id, epoch in resets.items():
+            if not isinstance(bucket_id, str) or not _is_finite_number(epoch):
+                continue
+            pool = _pool_for_bucket(bucket_id)
+            if pool is None:
+                continue
+            key = _reset_bucket_for(pool, _window_seconds_for(bucket_id))
+            if key is None:
+                continue
+            if key not in epochs or epoch > epochs[key]:
+                epochs[key] = epoch
+    for pool in POOL_RESET_KEYS:
+        entry = existing.get(pool)
+        if not isinstance(entry, dict):
+            continue
+        epoch = entry.get("resets_at")
+        if not _is_finite_number(epoch):
+            continue
+        key = _reset_bucket_for(pool, entry.get("window_seconds"))
+        if key is not None and key not in epochs:
+            epochs[key] = epoch
+    return epochs
+
+
+def _pool_is_regressed(
+    pool: str, incoming: dict[str, int], existing: dict[str, int]
+) -> bool:
+    """True when one pool's incoming reading trails the fresh cache.
+
+    The pool regressed when its weekly reset epoch is earlier than the
+    cached one, or — the weekly epochs agreeing within skew, or missing
+    on at least one side — when its 5-hour epoch is earlier than the
+    cached one. A forward weekly reset is progress, never a regression.
+    """
+    weekly, five = POOL_RESET_KEYS[pool]
+    incoming_weekly = incoming.get(weekly)
+    existing_weekly = existing.get(weekly)
+    if incoming_weekly is not None and existing_weekly is not None:
+        if incoming_weekly < existing_weekly - RESET_SKEW_SECS:
+            return True
+        if abs(incoming_weekly - existing_weekly) > RESET_SKEW_SECS:
+            return False
+    incoming_five = incoming.get(five)
+    existing_five = existing.get(five)
+    return (
+        incoming_five is not None
+        and existing_five is not None
+        and incoming_five < existing_five - RESET_SKEW_SECS
+    )
+
+
+def _cache_pool_entry(entry: object) -> dict | None:
+    """A cached pool window ready to write back, or None when unusable.
+
+    Exactly the four keys ``save_cache`` persists are copied, so a
+    preserved pool keeps the schema and nothing else; a malformed entry
+    is ignored rather than crashing the collector.
+    """
+    if not isinstance(entry, dict):
+        return None
+    window: dict[str, int | float] = {}
+    for key in ("used_percent", "remaining_percent", "resets_at", "window_seconds"):
+        value = entry.get(key)
+        if not _is_finite_number(value):
+            return None
+        window[key] = value
+    return window
+
+
+def _guarded_cache_update(
+    existing: dict | None,
+    now: int,
+    gemini: dict | None,
+    third_party: dict | None,
+    incoming_resets: dict[str, int],
+) -> tuple[dict | None, dict | None, dict[str, int]] | None:
+    """The windows and reset epochs main() may persist, or None to skip.
+
+    With no fresh cache to defend — the file missing, unreadable, or
+    older than ``STALE_GUARD_MAX_AGE_SECS`` — the incoming reading is
+    persisted unchanged. Otherwise each pool is judged independently
+    against the cached reset epochs: a regressed pool keeps the cached
+    window and epochs, a pool the payload omits keeps whatever the cache
+    holds, and a healthy pool is written with its epochs merged over the
+    cached ones. None is returned only when every pool the payload
+    reports regressed, leaving the cache — ``fetched_at`` included —
+    untouched.
+    """
+    if existing is None or not _cache_is_fresh(existing, now):
+        return gemini, third_party, dict(incoming_resets)
+    existing_resets = _reset_epochs_from_cache(existing)
+    incoming_windows = {"gemini": gemini, "third_party": third_party}
+    planned_windows = {
+        "gemini": _cache_pool_entry(existing.get("gemini")),
+        "third_party": _cache_pool_entry(existing.get("third_party")),
+    }
+    planned_resets = {
+        pool: {
+            key: epoch
+            for key, epoch in existing_resets.items()
+            if key in POOL_RESET_KEYS[pool]
+        }
+        for pool in POOL_RESET_KEYS
+    }
+    reported: set[str] = set()
+    regressed: set[str] = set()
+    for pool, keys in POOL_RESET_KEYS.items():
+        pool_resets = {
+            key: epoch for key, epoch in incoming_resets.items() if key in keys
+        }
+        if not pool_resets:
+            continue  # The payload omits this pool: keep the cached one.
+        reported.add(pool)
+        if _pool_is_regressed(pool, pool_resets, existing_resets):
+            regressed.add(pool)
+            continue
+        planned_windows[pool] = incoming_windows[pool]
+        planned_resets[pool].update(pool_resets)
+    if regressed and regressed == reported:
+        # Every pool this payload reports still holds pre-reset windows.
+        return None
+    merged: dict[str, int] = {}
+    for epochs in planned_resets.values():
+        merged.update(epochs)
+    return planned_windows["gemini"], planned_windows["third_party"], merged
 
 
 def session_is_current(document: object, now: int) -> bool:
@@ -708,9 +967,23 @@ def main(argv: list[str] | None = None) -> int:
             document, now
         ):
             try:
-                save_cache(
-                    statusline_cache_path(), now, gemini, third_party=third_party
+                cache_path = statusline_cache_path()
+                update = _guarded_cache_update(
+                    _read_existing_cache(cache_path),
+                    now,
+                    gemini,
+                    third_party,
+                    _reset_epochs_from_windows(windows),
                 )
+                if update is not None:
+                    window, third, resets = update
+                    save_cache(
+                        cache_path,
+                        now,
+                        window,
+                        third_party=third,
+                        bucket_resets=resets,
+                    )
             except OSError:
                 # A cache write failure must never suppress an existing
                 # status line; warn once and keep displaying.

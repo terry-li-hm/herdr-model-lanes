@@ -49,6 +49,18 @@ def _iso(epoch: int) -> str:
     return datetime.fromtimestamp(epoch, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _cached_window(
+    used_percent: int, remaining_percent: int, resets_at: int, window_seconds: int
+) -> dict:
+    """The four-key window shape antigravity-quota.json stores."""
+    return {
+        "used_percent": used_percent,
+        "remaining_percent": remaining_percent,
+        "resets_at": resets_at,
+        "window_seconds": window_seconds,
+    }
+
+
 def _payload(quota: object | None = None, **extra: object) -> dict:
     document = {
         "session_id": SYNTHETIC_SESSION,
@@ -442,6 +454,43 @@ class SaveCacheTests(unittest.TestCase):
         self.assertEqual(set(cached), {"third_party", "fetched_at"})
         self.assertEqual(cached["third_party"]["remaining_percent"], 78)
 
+    def test_bucket_resets_are_written_additively_when_provided(self) -> None:
+        gemini = self._window(14, 86, 604_800)
+        third_party = self._window(22, 78, 604_800)
+
+        collector.save_cache(
+            self.path,
+            self.NOW,
+            gemini,
+            third_party=third_party,
+            bucket_resets={"gemini-weekly": 17_640, "gemini-5h": 3_600},
+        )
+
+        cached = json.loads(self.path.read_text())
+        self.assertEqual(
+            set(cached), {"gemini", "third_party", "fetched_at", "bucket_resets"}
+        )
+        self.assertEqual(
+            set(cached["gemini"]),
+            {"used_percent", "remaining_percent", "resets_at", "window_seconds"},
+        )
+        self.assertEqual(
+            cached["bucket_resets"], {"gemini-weekly": 17_640, "gemini-5h": 3_600}
+        )
+
+    def test_absent_or_empty_bucket_resets_are_omitted(self) -> None:
+        gemini = self._window(14, 86, 604_800)
+
+        collector.save_cache(self.path, self.NOW, gemini, bucket_resets=None)
+        self.assertEqual(
+            set(json.loads(self.path.read_text())), {"gemini", "fetched_at"}
+        )
+
+        collector.save_cache(self.path, self.NOW, gemini, bucket_resets={})
+        self.assertEqual(
+            set(json.loads(self.path.read_text())), {"gemini", "fetched_at"}
+        )
+
 
 class CollectorMainTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -479,7 +528,9 @@ class CollectorMainTests(unittest.TestCase):
         mode = stat.S_IMODE(self.cache.stat().st_mode)
         self.assertEqual(mode, 0o600)
         cached = json.loads(self.cache.read_text())
-        self.assertEqual(set(cached), {"gemini", "third_party", "fetched_at"})
+        self.assertEqual(
+            set(cached), {"gemini", "third_party", "fetched_at", "bucket_resets"}
+        )
         self.assertEqual(
             set(cached["gemini"]),
             {"used_percent", "remaining_percent", "resets_at", "window_seconds"},
@@ -497,6 +548,14 @@ class CollectorMainTests(unittest.TestCase):
         self.assertEqual(cached["third_party"]["window_seconds"], 604_800)
         self.assertEqual(
             cached["third_party"]["resets_at"], cached["fetched_at"] + 514_800
+        )
+        self.assertEqual(
+            cached["bucket_resets"],
+            {
+                "gemini-5h": cached["fetched_at"] + 17_640,
+                "gemini-weekly": cached["fetched_at"] + 514_800,
+                "3p-weekly": cached["fetched_at"] + 514_800,
+            },
         )
         leftovers = [p.name for p in self.state.iterdir() if p.name != self.cache.name]
         self.assertEqual(leftovers, [])
@@ -548,7 +607,9 @@ class CollectorMainTests(unittest.TestCase):
         # Rendering is unchanged: a Gemini model summarises the 3p weekly pool.
         self.assertIn("3p 22%", output)
         cached = json.loads(self.cache.read_text())
-        self.assertEqual(set(cached), {"gemini", "third_party", "fetched_at"})
+        self.assertEqual(
+            set(cached), {"gemini", "third_party", "fetched_at", "bucket_resets"}
+        )
         self.assertEqual(cached["gemini"]["remaining_percent"], 86)
         self.assertEqual(cached["gemini"]["window_seconds"], 604_800)
         # The tighter 3p five-hour bucket wins over the weekly one.
@@ -558,6 +619,15 @@ class CollectorMainTests(unittest.TestCase):
         self.assertEqual(
             cached["third_party"]["resets_at"], cached["fetched_at"] + 17_640
         )
+        self.assertEqual(
+            cached["bucket_resets"],
+            {
+                "gemini-5h": cached["fetched_at"] + 17_640,
+                "gemini-weekly": cached["fetched_at"] + 514_800,
+                "3p-5h": cached["fetched_at"] + 17_640,
+                "3p-weekly": cached["fetched_at"] + 514_800,
+            },
+        )
 
     def test_persists_third_party_only_when_no_gemini_bucket_is_reported(self) -> None:
         quota = {"3p-weekly": _bucket(0.78, reset_in_secs=514_800)}
@@ -566,9 +636,14 @@ class CollectorMainTests(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         cached = json.loads(self.cache.read_text())
-        self.assertEqual(set(cached), {"third_party", "fetched_at"})
+        self.assertEqual(
+            set(cached), {"third_party", "fetched_at", "bucket_resets"}
+        )
         self.assertEqual(cached["third_party"]["remaining_percent"], 78)
         self.assertEqual(cached["third_party"]["window_seconds"], 604_800)
+        self.assertEqual(
+            cached["bucket_resets"], {"3p-weekly": cached["fetched_at"] + 514_800}
+        )
 
     def test_never_persists_sensitive_input_fields(self) -> None:
         rc, _, _ = self._run(json.dumps(_payload(_live_quota())).encode())
@@ -776,6 +851,288 @@ class CollectorMainTests(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("usage:", errors)
         self.assertFalse(self.cache.exists())
+
+
+class StaleResetRollbackTests(unittest.TestCase):
+    """The fresh-cache rollback guard for antigravity-quota.json.
+
+    An older ``agy`` session that started before a global quota reset
+    keeps reporting pre-reset buckets while staying non-idle, so its
+    save would roll the shared cache backwards; the guard skips or
+    merges such writes pool by pool.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.state = Path(self._tmp.name)
+        self.cache = self.state / "antigravity-quota.json"
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key
+            not in ("HERDR_PLUGIN_STATE_DIR", "MODEL_LANES_STATE_DIR", "XDG_STATE_HOME")
+        }
+        env["HERDR_PLUGIN_STATE_DIR"] = str(self.state)
+        patcher = mock.patch.dict(os.environ, env)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _run(self, stdin_bytes: bytes, argv: list[str] | None = None) -> tuple:
+        with _Stdio(stdin_bytes) as stdio:
+            rc = collector.main(argv if argv is not None else [])
+            output = stdio.stdout_text
+            errors = stdio.stderr_text
+        return rc, output, errors
+
+    def _seed(self, payload: dict) -> None:
+        """Install an existing shared cache exactly as given."""
+        self.cache.write_text(json.dumps(payload))
+
+    def test_live_bug_pre_reset_weekly_from_an_older_session_is_rejected(self) -> None:
+        # 2026-11-26: a post-reset session cached the tightest 5h window
+        # at 99% with gemini-weekly 7 days out, and an older non-idle tab
+        # kept sending the pre-reset weekly bucket at 39%, ping-ponging
+        # the shared cache between the two readings.
+        now = int(time.time())
+        five_reset = now + 4 * 3_600
+        weekly_reset = now + 7 * 86_400
+        self._seed(
+            {
+                "gemini": _cached_window(1, 99, five_reset, 18_000),
+                "third_party": _cached_window(22, 78, weekly_reset, 604_800),
+                "bucket_resets": {
+                    "gemini-weekly": weekly_reset,
+                    "gemini-5h": five_reset,
+                    "3p-weekly": weekly_reset,
+                },
+                "fetched_at": now,
+            }
+        )
+        before = self.cache.read_text()
+        quota = {
+            "gemini-5h": _bucket(0.95, reset_in_secs=2 * 3_600),
+            "gemini-weekly": _bucket(0.39, reset_in_secs=5 * 86_400),
+        }
+
+        rc, output, _ = self._run(json.dumps(_payload(quota)).encode())
+
+        self.assertEqual(rc, 0)
+        # The terminal still renders its own, older, reading.
+        self.assertIn("5h 5%", output)
+        self.assertIn("7d 61%", output)
+        # The shared cache keeps its percentages and its fetched_at.
+        self.assertEqual(self.cache.read_text(), before)
+
+    def test_earlier_five_hour_epoch_under_matching_weekly_is_rejected(self) -> None:
+        now = int(time.time())
+        five_reset = now + 4 * 3_600
+        weekly_reset = now + 7 * 86_400
+        self._seed(
+            {
+                "gemini": _cached_window(1, 99, five_reset, 18_000),
+                "bucket_resets": {
+                    "gemini-weekly": weekly_reset,
+                    "gemini-5h": five_reset,
+                },
+                "fetched_at": now,
+            }
+        )
+        before = self.cache.read_text()
+        quota = {
+            "gemini-5h": _bucket(0.95, reset_in_secs=2 * 3_600),
+            "gemini-weekly": _bucket(0.86, reset_in_secs=7 * 86_400),
+        }
+
+        rc, _, _ = self._run(json.dumps(_payload(quota)).encode())
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.cache.read_text(), before)
+
+    def test_same_epochs_with_fresh_consumption_persist(self) -> None:
+        now = int(time.time())
+        five_reset = now + 4 * 3_600
+        weekly_reset = now + 7 * 86_400
+        self._seed(
+            {
+                "gemini": _cached_window(1, 99, five_reset, 18_000),
+                "bucket_resets": {
+                    "gemini-weekly": weekly_reset,
+                    "gemini-5h": five_reset,
+                },
+                "fetched_at": now,
+            }
+        )
+        # Same reset epochs; consumption moved 99% -> 95% remaining.
+        quota = {
+            "gemini-5h": _bucket(0.95, reset_in_secs=4 * 3_600),
+            "gemini-weekly": _bucket(0.99, reset_in_secs=7 * 86_400),
+        }
+
+        rc, _, _ = self._run(json.dumps(_payload(quota)).encode())
+
+        self.assertEqual(rc, 0)
+        cached = json.loads(self.cache.read_text())
+        self.assertEqual(
+            set(cached), {"gemini", "fetched_at", "bucket_resets"}
+        )
+        self.assertEqual(cached["gemini"]["remaining_percent"], 95)
+        self.assertEqual(cached["gemini"]["window_seconds"], 18_000)
+        self.assertGreaterEqual(cached["gemini"]["resets_at"], five_reset)
+        self.assertGreaterEqual(cached["fetched_at"], now)
+        self.assertEqual(
+            set(cached["bucket_resets"]), {"gemini-weekly", "gemini-5h"}
+        )
+
+    def test_forward_reset_persists_normally(self) -> None:
+        now = int(time.time())
+        old_weekly = now + 2 * 86_400
+        self._seed(
+            {
+                "gemini": _cached_window(61, 39, old_weekly, 604_800),
+                "bucket_resets": {"gemini-weekly": old_weekly},
+                "fetched_at": now,
+            }
+        )
+        quota = {"gemini-weekly": _bucket(0.99, reset_in_secs=7 * 86_400)}
+
+        rc, _, _ = self._run(json.dumps(_payload(quota)).encode())
+
+        self.assertEqual(rc, 0)
+        cached = json.loads(self.cache.read_text())
+        self.assertEqual(cached["gemini"]["remaining_percent"], 99)
+        self.assertEqual(cached["gemini"]["window_seconds"], 604_800)
+        self.assertGreater(cached["gemini"]["resets_at"], old_weekly + 86_400)
+        self.assertEqual(
+            cached["bucket_resets"]["gemini-weekly"],
+            cached["gemini"]["resets_at"],
+        )
+
+    def test_legacy_cache_without_bucket_resets_still_rejects(self) -> None:
+        now = int(time.time())
+        weekly_reset = now + 7 * 86_400
+        self._seed(
+            {
+                "gemini": _cached_window(1, 99, weekly_reset, 604_800),
+                "fetched_at": now,
+            }
+        )
+        before = self.cache.read_text()
+        quota = {"gemini-weekly": _bucket(0.39, reset_in_secs=5 * 86_400)}
+
+        rc, _, _ = self._run(json.dumps(_payload(quota)).encode())
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.cache.read_text(), before)
+
+    def test_regressed_gemini_with_fresh_third_party_merges_pool_by_pool(
+        self,
+    ) -> None:
+        now = int(time.time())
+        five_reset = now + 4 * 3_600
+        weekly_reset = now + 7 * 86_400
+        self._seed(
+            {
+                "gemini": _cached_window(1, 99, five_reset, 18_000),
+                "third_party": _cached_window(22, 78, weekly_reset, 604_800),
+                "bucket_resets": {
+                    "gemini-weekly": weekly_reset,
+                    "gemini-5h": five_reset,
+                    "3p-weekly": weekly_reset,
+                },
+                "fetched_at": now,
+            }
+        )
+        quota = {
+            "gemini-5h": _bucket(0.95, reset_in_secs=4 * 3_600),
+            "gemini-weekly": _bucket(0.39, reset_in_secs=5 * 86_400),
+            "3p-weekly": _bucket(0.50, reset_in_secs=7 * 86_400),
+        }
+
+        rc, output, _ = self._run(json.dumps(_payload(quota)).encode())
+
+        self.assertEqual(rc, 0)
+        self.assertIn("3p 50%", output)
+        cached = json.loads(self.cache.read_text())
+        # The regressed Gemini pool keeps the cached window and epochs.
+        self.assertEqual(cached["gemini"], _cached_window(1, 99, five_reset, 18_000))
+        self.assertEqual(cached["bucket_resets"]["gemini-weekly"], weekly_reset)
+        self.assertEqual(cached["bucket_resets"]["gemini-5h"], five_reset)
+        # The healthy third-party pool is updated with a new fetched_at.
+        self.assertEqual(cached["third_party"]["remaining_percent"], 50)
+        self.assertEqual(cached["third_party"]["window_seconds"], 604_800)
+        self.assertGreaterEqual(cached["fetched_at"], now)
+
+    def test_guard_expires_after_half_an_hour(self) -> None:
+        now = int(time.time())
+        weekly_reset = now + 7 * 86_400
+        self._seed(
+            {
+                "gemini": _cached_window(1, 99, weekly_reset, 604_800),
+                "bucket_resets": {"gemini-weekly": weekly_reset},
+                "fetched_at": now - collector.STALE_GUARD_MAX_AGE_SECS - 600,
+            }
+        )
+        quota = {"gemini-weekly": _bucket(0.39, reset_in_secs=5 * 86_400)}
+
+        rc, _, _ = self._run(json.dumps(_payload(quota)).encode())
+
+        self.assertEqual(rc, 0)
+        cached = json.loads(self.cache.read_text())
+        self.assertEqual(cached["gemini"]["remaining_percent"], 39)
+        self.assertGreaterEqual(cached["fetched_at"], now)
+        self.assertEqual(
+            cached["bucket_resets"], {"gemini-weekly": cached["gemini"]["resets_at"]}
+        )
+
+    def test_corrupt_or_oversized_existing_cache_still_writes(self) -> None:
+        quota = {"gemini-weekly": _bucket(0.39, reset_in_secs=5 * 86_400)}
+        oversized = json.dumps(
+            {
+                "gemini": {},
+                "fetched_at": 0,
+                "pad": "x" * (collector.MAX_CACHE_BYTES + 5_000),
+            }
+        )
+        for label, existing in (("corrupt", "{not json"), ("oversized", oversized)):
+            with self.subTest(existing=label):
+                self.cache.write_text(existing)
+
+                rc, _, _ = self._run(json.dumps(_payload(quota)).encode())
+
+                self.assertEqual(rc, 0)
+                cached = json.loads(self.cache.read_text())
+                self.assertEqual(
+                    set(cached), {"gemini", "fetched_at", "bucket_resets"}
+                )
+                self.assertEqual(cached["gemini"]["remaining_percent"], 39)
+
+    def test_gemini_only_payload_preserves_cached_third_party(self) -> None:
+        now = int(time.time())
+        weekly_reset = now + 7 * 86_400
+        self._seed(
+            {
+                "gemini": _cached_window(1, 99, weekly_reset, 604_800),
+                "third_party": _cached_window(22, 78, weekly_reset, 604_800),
+                "bucket_resets": {
+                    "gemini-weekly": weekly_reset,
+                    "3p-weekly": weekly_reset,
+                },
+                "fetched_at": now,
+            }
+        )
+        quota = {"gemini-weekly": _bucket(0.86, reset_in_secs=7 * 86_400)}
+
+        rc, _, _ = self._run(json.dumps(_payload(quota)).encode())
+
+        self.assertEqual(rc, 0)
+        cached = json.loads(self.cache.read_text())
+        self.assertEqual(cached["gemini"]["remaining_percent"], 86)
+        self.assertEqual(
+            cached["third_party"], _cached_window(22, 78, weekly_reset, 604_800)
+        )
+        self.assertEqual(cached["bucket_resets"]["3p-weekly"], weekly_reset)
+        self.assertGreaterEqual(cached["fetched_at"], now)
 
 
 class RenderSegmentsTests(unittest.TestCase):
